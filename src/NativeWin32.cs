@@ -113,7 +113,53 @@ namespace Monolith
         public const int DWMWA_CLOAKED = 14;
         public const int DWMWA_WINDOW_CORNER_PREFERENCE = 33;
 
+        public const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+
         public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct SIZE
+        {
+            public int cx;
+            public int cy;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct BITMAP
+        {
+            public int bmType;
+            public int bmWidth;
+            public int bmHeight;
+            public int bmWidthBytes;
+            public ushort bmPlanes;
+            public ushort bmBitsPixel;
+            public IntPtr bmBits;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct BITMAPINFOHEADER
+        {
+            public uint biSize;
+            public int biWidth;
+            public int biHeight;
+            public ushort biPlanes;
+            public ushort biBitCount;
+            public uint biCompression;
+            public uint biSizeImage;
+            public int biXPelsPerMeter;
+            public int biYPelsPerMeter;
+            public uint biClrUsed;
+            public uint biClrImportant;
+        }
+
+        [ComImport]
+        [Guid("bcc18b79-ba16-442f-80c4-8a59c30c463b")]
+        [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        public interface IShellItemImageFactory
+        {
+            [PreserveSig]
+            int GetImage(SIZE size, int flags, out IntPtr phbm);
+        }
 
         [StructLayout(LayoutKind.Sequential)]
         public struct FILETIME
@@ -229,6 +275,54 @@ namespace Monolith
 
         [DllImport("user32.dll")]
         public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        public static extern bool EnumChildWindows(IntPtr hWndParent, EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, uint dwProcessId);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern bool CloseHandle(IntPtr hObject);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        public static extern bool QueryFullProcessImageName(IntPtr hProcess, uint dwFlags, StringBuilder lpExeName, ref uint lpdwSize);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+        public static extern int GetApplicationUserModelId(IntPtr hProcess, ref uint applicationUserModelIdLength, StringBuilder applicationUserModelId);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+        public static extern int GetPackagesByPackageFamily(string packageFamilyName, ref uint count, IntPtr[] packageFullNames, ref uint bufferLength, char[] buffer);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+        public static extern int GetPackagePathByFullName(string packageFullName, ref uint pathLength, StringBuilder path);
+
+        [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = true)]
+        public static extern int SHCreateItemInKnownFolder(ref Guid kfid, uint dwKFFlags, string pszItem, ref Guid riid, [MarshalAs(UnmanagedType.Interface)] out IShellItemImageFactory ppv);
+
+        [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = true)]
+        public static extern int SHCreateItemFromParsingName(string pszPath, IntPtr pbc, ref Guid riid, [MarshalAs(UnmanagedType.Interface)] out IShellItemImageFactory ppv);
+
+        [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = true)]
+        public static extern int SHGetKnownFolderPath(ref Guid rfid, uint dwFlags, IntPtr hToken, out IntPtr ppszPath);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        public static extern uint PrivateExtractIcons(string szFileName, int nIconIndex, int cxIcon, int cyIcon, IntPtr[] phicon, uint[] piconid, uint nIcons, uint flags);
+
+        [DllImport("gdi32.dll")]
+        public static extern int GetObject(IntPtr hgdiobj, int cbBuffer, out BITMAP lpvObject);
+
+        [DllImport("gdi32.dll")]
+        public static extern bool DeleteObject(IntPtr hObject);
+
+        [DllImport("user32.dll")]
+        public static extern IntPtr GetDC(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        public static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+
+        [DllImport("gdi32.dll")]
+        public static extern int GetDIBits(IntPtr hdc, IntPtr hbmp, uint uStartScan, uint cScanLines, byte[] lpvBits, ref BITMAPINFOHEADER lpbmi, uint uUsage);
 
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
         public static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
@@ -1063,6 +1157,633 @@ namespace Monolith
             return null;
         }
 
+        // ====== High-Res Icon Extraction (Classic Win32 + Elevated Apps + Steam/URL + Uninstall + UWP/Store/MSIX) ======
+        private static readonly Dictionary<string, ImageSource> _uwpAumidIconCache = new Dictionary<string, ImageSource>(StringComparer.OrdinalIgnoreCase);
+        private static readonly Dictionary<IntPtr, ImageSource> _uwpHwndIconCache = new Dictionary<IntPtr, ImageSource>();
+        private static readonly Dictionary<string, string> _titleToAumidMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        private static readonly Dictionary<string, string> _titleToIconPathMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        private static readonly Dictionary<string, string> _steamAppIdToIconMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        private static bool _uninstallIconsLoaded = false;
+
+        public static void RegisterAppTitleAumid(string title, string aumid)
+        {
+            if (string.IsNullOrEmpty(title) || string.IsNullOrEmpty(aumid)) return;
+            lock (_titleToAumidMap)
+            {
+                if (!_titleToAumidMap.ContainsKey(title))
+                    _titleToAumidMap[title] = aumid;
+            }
+        }
+
+        public static void RegisterAppTitleIconPath(string title, string iconPath)
+        {
+            if (string.IsNullOrEmpty(title) || string.IsNullOrEmpty(iconPath)) return;
+            lock (_titleToIconPathMap)
+            {
+                if (!_titleToIconPathMap.ContainsKey(title))
+                    _titleToIconPathMap[title] = iconPath;
+            }
+        }
+
+        public static string TryLookupRegisteredIconPath(string title, string aumid)
+        {
+            EnsureUninstallIconsLoaded();
+            if (!string.IsNullOrEmpty(aumid) && aumid.StartsWith("steam://rungameid/", StringComparison.OrdinalIgnoreCase))
+            {
+                string id = aumid.Substring("steam://rungameid/".Length).Trim();
+                lock (_steamAppIdToIconMap)
+                {
+                    string sp;
+                    if (_steamAppIdToIconMap.TryGetValue(id, out sp) && !string.IsNullOrEmpty(sp))
+                        return sp;
+                }
+            }
+            if (!string.IsNullOrEmpty(title))
+            {
+                lock (_titleToIconPathMap)
+                {
+                    string tp;
+                    if (_titleToIconPathMap.TryGetValue(title, out tp) && !string.IsNullOrEmpty(tp))
+                        return tp;
+                }
+            }
+            return null;
+        }
+
+        public static void EnsureUninstallIconsLoaded()
+        {
+            if (_uninstallIconsLoaded) return;
+            _uninstallIconsLoaded = true;
+            try
+            {
+                ScanUninstallKeyForIcons(Registry.CurrentUser, @"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall");
+                ScanUninstallKeyForIcons(Registry.LocalMachine, @"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall");
+                ScanUninstallKeyForIcons(Registry.LocalMachine, @"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall");
+            }
+            catch { }
+        }
+
+        private static void ScanUninstallKeyForIcons(RegistryKey root, string subPath)
+        {
+            try
+            {
+                using (RegistryKey key = root.OpenSubKey(subPath))
+                {
+                    if (key == null) return;
+                    string[] names = key.GetSubKeyNames();
+                    for (int i = 0; i < names.Length; i++)
+                    {
+                        try
+                        {
+                            string subName = names[i];
+                            using (RegistryKey sk = key.OpenSubKey(subName))
+                            {
+                                if (sk == null) continue;
+                                string dispName = sk.GetValue("DisplayName") as string;
+                                string dispIcon = sk.GetValue("DisplayIcon") as string;
+                                if (string.IsNullOrEmpty(dispIcon)) continue;
+
+                                string cleanFile;
+                                int idx;
+                                ParseIconPathAndIndex(dispIcon, out cleanFile, out idx);
+                                if (string.IsNullOrEmpty(cleanFile) || !File.Exists(cleanFile)) continue;
+                                string fnLower = Path.GetFileName(cleanFile).ToLowerInvariant();
+                                if (fnLower.IndexOf("unins", StringComparison.Ordinal) >= 0) continue;
+
+                                if (!string.IsNullOrEmpty(dispName))
+                                    RegisterAppTitleIconPath(dispName.Trim(), dispIcon);
+
+                                if (subName.StartsWith("Steam App ", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    string appId = subName.Substring("Steam App ".Length).Trim();
+                                    if (!string.IsNullOrEmpty(appId))
+                                    {
+                                        lock (_steamAppIdToIconMap)
+                                        {
+                                            if (!_steamAppIdToIconMap.ContainsKey(appId))
+                                                _steamAppIdToIconMap[appId] = dispIcon;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        catch { }
+                    }
+                }
+            }
+            catch { }
+        }
+
+        public static string TryResolveKnownFolderGuidPath(string aumid)
+        {
+            if (string.IsNullOrEmpty(aumid) || aumid[0] != '{') return null;
+            int close = aumid.IndexOf('}');
+            if (close <= 32 || close + 1 >= aumid.Length) return null;
+            try
+            {
+                Guid kfGuid = new Guid(aumid.Substring(0, close + 1));
+                IntPtr pPath;
+                if (SHGetKnownFolderPath(ref kfGuid, 0, IntPtr.Zero, out pPath) == 0 && pPath != IntPtr.Zero)
+                {
+                    try
+                    {
+                        string baseDir = Marshal.PtrToStringUni(pPath);
+                        if (!string.IsNullOrEmpty(baseDir))
+                        {
+                            string rest = aumid.Substring(close + 1).TrimStart('\\', '/');
+                            string combined = Path.Combine(baseDir, rest);
+                            if (File.Exists(combined)) return combined;
+                        }
+                    }
+                    finally
+                    {
+                        Marshal.FreeCoTaskMem(pPath);
+                    }
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        public static void ParseIconPathAndIndex(string raw, out string filePath, out int iconIndex)
+        {
+            filePath = "";
+            iconIndex = 0;
+            if (string.IsNullOrEmpty(raw)) return;
+            string s = raw.Trim();
+            int comma = s.LastIndexOf(',');
+            if (comma > 2 && comma < s.Length - 1)
+            {
+                int parsedIdx;
+                string tail = s.Substring(comma + 1).Trim().Trim('"');
+                if (int.TryParse(tail, out parsedIdx))
+                {
+                    iconIndex = parsedIdx;
+                    s = s.Substring(0, comma).Trim();
+                }
+            }
+            s = s.Trim().Trim('"');
+            filePath = Environment.ExpandEnvironmentVariables(s);
+        }
+
+        public static string ReadUrlShortcutIconFile(string urlPath)
+        {
+            if (string.IsNullOrEmpty(urlPath) || !File.Exists(urlPath)) return null;
+            try
+            {
+                string[] lines = File.ReadAllLines(urlPath);
+                string iconFile = null;
+                string iconIdx = null;
+                for (int i = 0; i < lines.Length; i++)
+                {
+                    string ln = lines[i].Trim();
+                    if (ln.StartsWith("IconFile=", StringComparison.OrdinalIgnoreCase))
+                        iconFile = ln.Substring("IconFile=".Length).Trim();
+                    else if (ln.StartsWith("IconIndex=", StringComparison.OrdinalIgnoreCase))
+                        iconIdx = ln.Substring("IconIndex=".Length).Trim();
+                }
+                if (!string.IsNullOrEmpty(iconFile))
+                {
+                    if (!string.IsNullOrEmpty(iconIdx) && iconIdx != "0")
+                        return iconFile + "," + iconIdx;
+                    return iconFile;
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        public static string TryGetProcessExePath(uint pid)
+        {
+            if (pid == 0) return "";
+            IntPtr hProc = IntPtr.Zero;
+            try
+            {
+                hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
+                if (hProc == IntPtr.Zero) return "";
+                StringBuilder sb = new StringBuilder(1024);
+                uint sz = (uint)sb.Capacity;
+                if (QueryFullProcessImageName(hProc, 0, sb, ref sz) && sz > 0)
+                    return sb.ToString();
+            }
+            catch { }
+            finally
+            {
+                if (hProc != IntPtr.Zero) CloseHandle(hProc);
+            }
+            return "";
+        }
+
+        public static string TryGetProcessAumid(uint pid)
+        {
+            if (pid == 0) return null;
+            IntPtr hProc = IntPtr.Zero;
+            try
+            {
+                hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
+                if (hProc == IntPtr.Zero) return null;
+                uint len = 0;
+                int rc = GetApplicationUserModelId(hProc, ref len, null);
+                if (rc == 122 && len > 0) // ERROR_INSUFFICIENT_BUFFER
+                {
+                    StringBuilder sb = new StringBuilder((int)len);
+                    rc = GetApplicationUserModelId(hProc, ref len, sb);
+                    if (rc == 0 && sb.Length > 0)
+                        return sb.ToString();
+                }
+            }
+            catch { }
+            finally
+            {
+                if (hProc != IntPtr.Zero) CloseHandle(hProc);
+            }
+            return null;
+        }
+
+        public static string TryGetWindowAppUserModelId(IntPtr hwnd, out string realExePath)
+        {
+            realExePath = "";
+            if (hwnd == IntPtr.Zero) return null;
+            try
+            {
+                uint topPid;
+                GetWindowThreadProcessId(hwnd, out topPid);
+                if (topPid == 0) return null;
+
+                uint targetPid = topPid;
+                string cls = GetWindowClassName(hwnd);
+                if (cls == "ApplicationFrameWindow")
+                {
+                    uint foundChildPid = 0;
+                    EnumChildWindows(hwnd, delegate(IntPtr child, IntPtr lp)
+                    {
+                        uint cpid;
+                        GetWindowThreadProcessId(child, out cpid);
+                        if (cpid != 0 && cpid != topPid)
+                        {
+                            foundChildPid = cpid;
+                            return false;
+                        }
+                        return true;
+                    }, IntPtr.Zero);
+                    if (foundChildPid != 0)
+                        targetPid = foundChildPid;
+                }
+
+                realExePath = TryGetProcessExePath(targetPid);
+                string aumid = TryGetProcessAumid(targetPid);
+                if (!string.IsNullOrEmpty(aumid)) return aumid;
+
+                // Fallback for minimized/suspended UWP ApplicationFrameWindow whose CoreWindow detached
+                if (cls == "ApplicationFrameWindow")
+                {
+                    string title = GetWindowTitle(hwnd);
+                    if (!string.IsNullOrEmpty(title))
+                    {
+                        lock (_titleToAumidMap)
+                        {
+                            string mapped;
+                            if (_titleToAumidMap.TryGetValue(title, out mapped))
+                                return mapped;
+                        }
+                    }
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        private static string GetPackageInstallPathFromAumid(string aumid)
+        {
+            if (string.IsNullOrEmpty(aumid)) return null;
+            try
+            {
+                int bang = aumid.IndexOf('!');
+                string family = (bang > 0) ? aumid.Substring(0, bang) : aumid;
+
+                uint count = 0;
+                uint bufLen = 0;
+                int rc = GetPackagesByPackageFamily(family, ref count, null, ref bufLen, null);
+                if (rc != 122 || count == 0 || bufLen == 0) return null;
+
+                IntPtr[] ptrs = new IntPtr[count];
+                char[] buf = new char[bufLen];
+                rc = GetPackagesByPackageFamily(family, ref count, ptrs, ref bufLen, buf);
+                if (rc != 0 || count == 0) return null;
+
+                string fullName = Marshal.PtrToStringUni(ptrs[0]);
+                if (string.IsNullOrEmpty(fullName)) return null;
+
+                uint pathLen = 0;
+                rc = GetPackagePathByFullName(fullName, ref pathLen, null);
+                if (rc != 122 || pathLen == 0) return null;
+
+                StringBuilder sb = new StringBuilder((int)pathLen);
+                rc = GetPackagePathByFullName(fullName, ref pathLen, sb);
+                if (rc == 0 && sb.Length > 0) return sb.ToString();
+            }
+            catch { }
+            return null;
+        }
+
+        private static string ResolveBestUwpLogoPng(string pkgDir, string appId)
+        {
+            try
+            {
+                string manifestPath = Path.Combine(pkgDir, "AppxManifest.xml");
+                if (!File.Exists(manifestPath)) return null;
+                string xml = File.ReadAllText(manifestPath);
+
+                string scope = xml;
+                if (!string.IsNullOrEmpty(appId))
+                {
+                    string pat = "<Application[^>]*Id\\s*=\\s*\"" + System.Text.RegularExpressions.Regex.Escape(appId) + "\"[\\s\\S]*?</Application>";
+                    System.Text.RegularExpressions.Match appMatch = System.Text.RegularExpressions.Regex.Match(xml, pat, System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                    if (appMatch.Success) scope = appMatch.Value;
+                }
+
+                string relLogo = null;
+                string[] attrPatterns = new string[]
+                {
+                    "Square44x44Logo\\s*=\\s*\"([^\"]+)\"",
+                    "Square150x150Logo\\s*=\\s*\"([^\"]+)\"",
+                    "Square71x71Logo\\s*=\\s*\"([^\"]+)\"",
+                    "Square30x30Logo\\s*=\\s*\"([^\"]+)\"",
+                    "Logo\\s*=\\s*\"([^\"]+)\"",
+                    "<Logo>([^<]+)</Logo>"
+                };
+                for (int i = 0; i < attrPatterns.Length && string.IsNullOrEmpty(relLogo); i++)
+                {
+                    System.Text.RegularExpressions.Match m = System.Text.RegularExpressions.Regex.Match(scope, attrPatterns[i], System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                    if (!m.Success && scope != xml)
+                        m = System.Text.RegularExpressions.Regex.Match(xml, attrPatterns[i], System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                    if (m.Success) relLogo = m.Groups[1].Value.Trim();
+                }
+                if (string.IsNullOrEmpty(relLogo)) return null;
+
+                string fullBase = Path.Combine(pkgDir, relLogo.Replace('/', '\\'));
+                string dir = Path.GetDirectoryName(fullBase);
+                string stem = Path.GetFileNameWithoutExtension(fullBase);
+                string ext = Path.GetExtension(fullBase);
+                if (string.IsNullOrEmpty(ext)) ext = ".png";
+
+                string bestFile = File.Exists(fullBase) ? fullBase : null;
+                int bestScore = (bestFile != null) ? 50 : -99999;
+
+                if (!string.IsNullOrEmpty(dir) && Directory.Exists(dir))
+                {
+                    string[] cands = Directory.GetFiles(dir, stem + "*" + ext);
+                    if (cands.Length == 0)
+                    {
+                        try { cands = Directory.GetFiles(dir, stem + "*" + ext, SearchOption.AllDirectories); } catch { }
+                    }
+                    for (int i = 0; i < cands.Length; i++)
+                    {
+                        string f = cands[i];
+                        string n = Path.GetFileName(f).ToLowerInvariant();
+                        if (n.IndexOf("contrast-white", StringComparison.Ordinal) >= 0 ||
+                            n.IndexOf("contrast-black", StringComparison.Ordinal) >= 0 ||
+                            n.IndexOf("lightunplated", StringComparison.Ordinal) >= 0)
+                            continue;
+
+                        int score = 0;
+                        if (n.IndexOf("altform-unplated", StringComparison.Ordinal) >= 0) score += 1000;
+                        System.Text.RegularExpressions.Match tm = System.Text.RegularExpressions.Regex.Match(n, @"targetsize-(\d+)");
+                        if (tm.Success)
+                        {
+                            int ts;
+                            if (int.TryParse(tm.Groups[1].Value, out ts))
+                                score += 500 - Math.Abs(ts - 64);
+                        }
+                        else
+                        {
+                            System.Text.RegularExpressions.Match sm = System.Text.RegularExpressions.Regex.Match(n, @"scale-(\d+)");
+                            if (sm.Success)
+                            {
+                                int sc;
+                                if (int.TryParse(sm.Groups[1].Value, out sc))
+                                    score += 200 + sc;
+                            }
+                        }
+                        if (n.IndexOf("theme-dark", StringComparison.Ordinal) >= 0) score += 20;
+                        if (string.Equals(f, fullBase, StringComparison.OrdinalIgnoreCase)) score += 50;
+
+                        if (score > bestScore)
+                        {
+                            bestScore = score;
+                            bestFile = f;
+                        }
+                    }
+                }
+                return bestFile;
+            }
+            catch { return null; }
+        }
+
+        private static ImageSource LoadFrozenPngIcon(string pngPath)
+        {
+            if (string.IsNullOrEmpty(pngPath) || !File.Exists(pngPath)) return null;
+            try
+            {
+                byte[] bytes = File.ReadAllBytes(pngPath);
+                BitmapImage bmp = new BitmapImage();
+                bmp.BeginInit();
+                bmp.CacheOption = BitmapCacheOption.OnLoad;
+                bmp.DecodePixelWidth = 64;
+                bmp.StreamSource = new MemoryStream(bytes);
+                bmp.EndInit();
+                bmp.Freeze();
+                return bmp;
+            }
+            catch { return null; }
+        }
+
+        private static ImageSource HBitmapToFrozenImageSource(IntPtr hbm)
+        {
+            if (hbm == IntPtr.Zero) return null;
+            try
+            {
+                BITMAP bm;
+                if (GetObject(hbm, Marshal.SizeOf(typeof(BITMAP)), out bm) == 0 || bm.bmWidth <= 0 || bm.bmHeight <= 0)
+                    return null;
+                int w = bm.bmWidth;
+                int h = bm.bmHeight;
+                byte[] pixels = new byte[w * h * 4];
+                BITMAPINFOHEADER bmi = new BITMAPINFOHEADER();
+                bmi.biSize = (uint)Marshal.SizeOf(typeof(BITMAPINFOHEADER));
+                bmi.biWidth = w;
+                bmi.biHeight = -h; // top-down
+                bmi.biPlanes = 1;
+                bmi.biBitCount = 32;
+                bmi.biCompression = 0; // BI_RGB
+
+                IntPtr hdc = GetDC(IntPtr.Zero);
+                try { GetDIBits(hdc, hbm, 0, (uint)h, pixels, ref bmi, 0); }
+                finally { ReleaseDC(IntPtr.Zero, hdc); }
+
+                bool anyAlpha = false;
+                for (int i = 3; i < pixels.Length; i += 4)
+                {
+                    if (pixels[i] != 0) { anyAlpha = true; break; }
+                }
+                if (!anyAlpha)
+                {
+                    for (int i = 3; i < pixels.Length; i += 4) pixels[i] = 255;
+                }
+
+                BitmapSource src = BitmapSource.Create(w, h, 96, 96, PixelFormats.Bgra32, null, pixels, w * 4);
+                src.Freeze();
+                return src;
+            }
+            catch { return null; }
+        }
+
+        private static ImageSource LoadShellAppsFolderIcon(string aumid, int size)
+        {
+            if (string.IsNullOrEmpty(aumid)) return null;
+            IShellItemImageFactory factory = null;
+            try
+            {
+                Guid iid = new Guid("bcc18b79-ba16-442f-80c4-8a59c30c463b");
+                Guid kfApps = new Guid("1e87508d-89c2-42f0-8a7e-645a0f50ca58"); // FOLDERID_AppsFolder
+                int hr = SHCreateItemInKnownFolder(ref kfApps, 0x00004000, aumid, ref iid, out factory);
+                if (hr != 0 || factory == null) return null;
+
+                IntPtr hbm;
+                hr = factory.GetImage(new SIZE { cx = size, cy = size }, 0x00, out hbm); // SIIGBF_RESIZETOFIT
+                if (hr != 0 || hbm == IntPtr.Zero) return null;
+                try
+                {
+                    return HBitmapToFrozenImageSource(hbm);
+                }
+                finally
+                {
+                    DeleteObject(hbm);
+                }
+            }
+            catch { return null; }
+            finally
+            {
+                if (factory != null)
+                {
+                    try { Marshal.ReleaseComObject(factory); } catch { }
+                }
+            }
+        }
+
+        private static ImageSource LoadFrozenIcoFile(string icoPath)
+        {
+            if (string.IsNullOrEmpty(icoPath) || !File.Exists(icoPath)) return null;
+            try
+            {
+                byte[] bytes = File.ReadAllBytes(icoPath);
+                using (MemoryStream ms = new MemoryStream(bytes))
+                {
+                    IconBitmapDecoder dec = new IconBitmapDecoder(ms, BitmapCreateOptions.PreservePixelFormat, BitmapCacheOption.OnLoad);
+                    BitmapFrame best = null;
+                    int bestScore = -1;
+                    for (int i = 0; i < dec.Frames.Count; i++)
+                    {
+                        BitmapFrame fr = dec.Frames[i];
+                        int score = fr.PixelWidth * 10 + fr.Format.BitsPerPixel;
+                        if (fr.PixelWidth >= 48 && fr.PixelWidth <= 128) score += 2000;
+                        if (score > bestScore)
+                        {
+                            bestScore = score;
+                            best = fr;
+                        }
+                    }
+                    if (best != null)
+                    {
+                        best.Freeze();
+                        return best;
+                    }
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        private static ImageSource ExtractIconByPrivateApi(string filePath, int iconIndex)
+        {
+            if (string.IsNullOrEmpty(filePath) || !File.Exists(filePath)) return null;
+            try
+            {
+                IntPtr[] icons = new IntPtr[1];
+                uint[] ids = new uint[1];
+                uint got = PrivateExtractIcons(filePath, iconIndex, 48, 48, icons, ids, 1, 0);
+                if (got > 0 && icons[0] != IntPtr.Zero)
+                {
+                    try
+                    {
+                        BitmapSource src = Imaging.CreateBitmapSourceFromHIcon(
+                            icons[0], Int32Rect.Empty, BitmapSizeOptions.FromWidthAndHeight(48, 48));
+                        src.Freeze();
+                        return src;
+                    }
+                    finally
+                    {
+                        DestroyIcon(icons[0]);
+                    }
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        public static ImageSource ExtractUwpIconFromAumid(string aumid)
+        {
+            if (string.IsNullOrEmpty(aumid)) return null;
+            lock (_uwpAumidIconCache)
+            {
+                ImageSource cached;
+                if (_uwpAumidIconCache.TryGetValue(aumid, out cached))
+                    return cached;
+            }
+
+            ImageSource img = null;
+            try
+            {
+                // 1. KnownFolder GUID AUMID (e.g. {6D809377-...}\App\app.exe -> real filesystem .exe!)
+                string resolvedKfExe = TryResolveKnownFolderGuidPath(aumid);
+                if (!string.IsNullOrEmpty(resolvedKfExe))
+                    img = ExtractIconFromPath(resolvedKfExe);
+
+                // 2. Steam game AUMID (steam://rungameid/108710 -> real Steam .ico from Uninstall registry!)
+                if (img == null && aumid.StartsWith("steam://rungameid/", StringComparison.OrdinalIgnoreCase))
+                {
+                    string regIcon = TryLookupRegisteredIconPath(null, aumid);
+                    if (!string.IsNullOrEmpty(regIcon))
+                        img = ExtractIconFromPath(regIcon);
+                }
+
+                // 3. UWP / Microsoft Store / MSIX package: crisp 64x64 transparent unplated PNG from AppxManifest
+                if (img == null)
+                {
+                    string pkgDir = GetPackageInstallPathFromAumid(aumid);
+                    if (!string.IsNullOrEmpty(pkgDir))
+                    {
+                        int bang = aumid.IndexOf('!');
+                        string appId = (bang > 0 && bang + 1 < aumid.Length) ? aumid.Substring(bang + 1) : null;
+                        string logoPng = ResolveBestUwpLogoPng(pkgDir, appId);
+                        if (!string.IsNullOrEmpty(logoPng))
+                            img = LoadFrozenPngIcon(logoPng);
+                    }
+                }
+
+                // 4. Fallback: Shell AppsFolder IShellItemImageFactory (works great for NVIDIA App, etc.)
+                if (img == null)
+                    img = LoadShellAppsFolderIcon(aumid, 64);
+            }
+            catch { }
+
+            lock (_uwpAumidIconCache)
+            {
+                _uwpAumidIconCache[aumid] = img;
+            }
+            return img;
+        }
+
         public static ImageSource ExtractIconFromPath(string path)
         {
             if (string.IsNullOrEmpty(path)) return null;
@@ -1074,7 +1795,17 @@ namespace Monolith
                     return null;
                 }
 
-                string resolved = Environment.ExpandEnvironmentVariables(path);
+                if (path.StartsWith("shell:AppsFolder\\", StringComparison.OrdinalIgnoreCase))
+                {
+                    string aumid = path.Substring("shell:AppsFolder\\".Length).Trim();
+                    return ExtractUwpIconFromAumid(aumid);
+                }
+
+                string resolved;
+                int iconIndex;
+                ParseIconPathAndIndex(path, out resolved, out iconIndex);
+                if (string.IsNullOrEmpty(resolved)) return null;
+
                 if (!File.Exists(resolved) && !Directory.Exists(resolved))
                 {
                     string sys = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), resolved);
@@ -1084,6 +1815,47 @@ namespace Monolith
                         string sys32 = Path.Combine(Environment.SystemDirectory, resolved);
                         if (File.Exists(sys32)) resolved = sys32;
                     }
+                }
+
+                string ext = Path.GetExtension(resolved).ToLowerInvariant();
+
+                // .url internet/Steam game shortcut -> read its real IconFile=... entry!
+                if (ext == ".url" && File.Exists(resolved))
+                {
+                    string urlIcon = ReadUrlShortcutIconFile(resolved);
+                    if (!string.IsNullOrEmpty(urlIcon))
+                    {
+                        ImageSource uImg = ExtractIconFromPath(urlIcon);
+                        if (uImg != null) return uImg;
+                    }
+                }
+
+                // Direct PNG / JPG / BMP icon asset
+                if ((ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp") && File.Exists(resolved))
+                {
+                    ImageSource pImg = LoadFrozenPngIcon(resolved);
+                    if (pImg != null) return pImg;
+                }
+
+                // Direct .ico file -> decode sharpest high-res frame
+                if (ext == ".ico" && File.Exists(resolved))
+                {
+                    ImageSource iImg = LoadFrozenIcoFile(resolved);
+                    if (iImg != null) return iImg;
+                }
+
+                // Explicit icon index (e.g. from Registry DisplayIcon "app.exe,-101") or high-res PE extraction
+                if (iconIndex != 0 && File.Exists(resolved))
+                {
+                    ImageSource idxImg = ExtractIconByPrivateApi(resolved, iconIndex);
+                    if (idxImg != null) return idxImg;
+                }
+
+                // For .exe files, try 48x48 crisp PE icon first, then SHGetFileInfo
+                if (ext == ".exe" && File.Exists(resolved))
+                {
+                    ImageSource peImg = ExtractIconByPrivateApi(resolved, 0);
+                    if (peImg != null) return peImg;
                 }
 
                 SHFILEINFO shinfo = new SHFILEINFO();
@@ -1115,24 +1887,77 @@ namespace Monolith
 
         public static ImageSource ExtractIconFromWindow(IntPtr hwnd, string processPath)
         {
+            string realExePath = "";
             try
             {
+                // 1. UWP / Microsoft Store / MSIX packaged apps (Microsoft Store, Settings, Calculator, Photos, Paint, Notepad, Terminal, WhatsApp, Xbox...)
+                string aumid = TryGetWindowAppUserModelId(hwnd, out realExePath);
+                if (!string.IsNullOrEmpty(aumid))
+                {
+                    ImageSource uwpImg = ExtractUwpIconFromAumid(aumid);
+                    if (uwpImg != null)
+                    {
+                        lock (_uwpHwndIconCache) _uwpHwndIconCache[hwnd] = uwpImg;
+                        return uwpImg;
+                    }
+                }
+
+                // If minimized ApplicationFrameWindow, use previously cached crisp UWP icon
+                string cls = GetWindowClassName(hwnd);
+                if (cls == "ApplicationFrameWindow")
+                {
+                    lock (_uwpHwndIconCache)
+                    {
+                        ImageSource cachedUwp;
+                        if (_uwpHwndIconCache.TryGetValue(hwnd, out cachedUwp) && cachedUwp != null)
+                            return cachedUwp;
+                    }
+                }
+            }
+            catch { }
+
+            try
+            {
+                // 2. Crisp large window icon (WM_GETICON ICON_BIG / GCL_HICON)
                 IntPtr hIcon = IntPtr.Zero;
                 IntPtr res;
                 SendMessageTimeout(hwnd, WM_GETICON, (IntPtr)ICON_BIG, IntPtr.Zero, 2, 120, out res);
                 hIcon = res;
                 if (hIcon == IntPtr.Zero)
+                    hIcon = GetClassLongPtr(hwnd, GCL_HICON);
+
+                if (hIcon != IntPtr.Zero)
                 {
-                    SendMessageTimeout(hwnd, WM_GETICON, (IntPtr)ICON_SMALL2, IntPtr.Zero, 2, 120, out res);
-                    hIcon = res;
+                    BitmapSource src = Imaging.CreateBitmapSourceFromHIcon(
+                        hIcon,
+                        Int32Rect.Empty,
+                        BitmapSizeOptions.FromWidthAndHeight(48, 48));
+                    src.Freeze();
+                    return src;
                 }
+            }
+            catch { }
+
+            // 3. Crisp 48x48 icon directly from the real executable (fixes elevated admin apps, Task Manager, games where WM_GETICON is blocked or 0!)
+            string bestExe = !string.IsNullOrEmpty(realExePath) ? realExePath : processPath;
+            if (!string.IsNullOrEmpty(bestExe))
+            {
+                ImageSource exeImg = ExtractIconFromPath(bestExe);
+                if (exeImg != null) return exeImg;
+            }
+
+            // 4. Fallback to small window icons (ICON_SMALL2 / ICON_SMALL / GCL_HICONSM)
+            try
+            {
+                IntPtr hIcon = IntPtr.Zero;
+                IntPtr res;
+                SendMessageTimeout(hwnd, WM_GETICON, (IntPtr)ICON_SMALL2, IntPtr.Zero, 2, 120, out res);
+                hIcon = res;
                 if (hIcon == IntPtr.Zero)
                 {
                     SendMessageTimeout(hwnd, WM_GETICON, (IntPtr)ICON_SMALL, IntPtr.Zero, 2, 120, out res);
                     hIcon = res;
                 }
-                if (hIcon == IntPtr.Zero)
-                    hIcon = GetClassLongPtr(hwnd, GCL_HICON);
                 if (hIcon == IntPtr.Zero)
                     hIcon = GetClassLongPtr(hwnd, GCL_HICONSM);
 
@@ -1148,8 +1973,15 @@ namespace Monolith
             }
             catch { }
 
-            if (!string.IsNullOrEmpty(processPath))
-                return ExtractIconFromPath(processPath);
+            // 5. Final fallback: match window title against registered Uninstall/StartMenu DisplayIcon
+            try
+            {
+                string title = GetWindowTitle(hwnd);
+                string mappedIcon = TryLookupRegisteredIconPath(title, null);
+                if (!string.IsNullOrEmpty(mappedIcon))
+                    return ExtractIconFromPath(mappedIcon);
+            }
+            catch { }
 
             return null;
         }

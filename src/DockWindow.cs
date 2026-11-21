@@ -21,6 +21,7 @@ namespace Monolith
         public string Title;
         public string ProcessName;
         public string ExePath;
+        public string AppUserModelId;
         public bool IsForeground;
     }
 
@@ -1412,13 +1413,23 @@ namespace Monolith
 
                 string pName = "";
                 string exePath = "";
+                string aumid = null;
                 try
                 {
-                    Process pr = Process.GetProcessById((int)pid);
-                    pName = pr.ProcessName;
-                    try { exePath = pr.MainModule.FileName; } catch { }
+                    using (Process pr = Process.GetProcessById((int)pid))
+                    {
+                        pName = pr.ProcessName;
+                        try { exePath = pr.MainModule.FileName; } catch { }
+                    }
                 }
                 catch { }
+
+                string resolvedExe;
+                aumid = NativeWin32.TryGetWindowAppUserModelId(hWnd, out resolvedExe);
+                if (!string.IsNullOrEmpty(resolvedExe))
+                    exePath = resolvedExe;
+                else if (string.IsNullOrEmpty(exePath))
+                    exePath = NativeWin32.TryGetProcessExePath(pid);
 
                 list.Add(new OpenWindowInfo
                 {
@@ -1427,6 +1438,7 @@ namespace Monolith
                     Title = title,
                     ProcessName = pName,
                     ExePath = exePath,
+                    AppUserModelId = aumid,
                     IsForeground = (hWnd == fg)
                 });
                 return true;
@@ -1441,14 +1453,23 @@ namespace Monolith
             if (app == null || string.IsNullOrEmpty(app.Path) || wins == null) return res;
 
             string pinnedPath = app.Path.Trim();
-            string exeName = Path.GetFileNameWithoutExtension(pinnedPath);
-            if (string.IsNullOrEmpty(exeName)) return res;
+            bool isAppsFolder = pinnedPath.StartsWith("shell:AppsFolder\\", StringComparison.OrdinalIgnoreCase);
+            string pinnedAumid = isAppsFolder ? pinnedPath.Substring("shell:AppsFolder\\".Length).Trim() : null;
+            string exeName = isAppsFolder ? "" : Path.GetFileNameWithoutExtension(pinnedPath);
+            if (!isAppsFolder && string.IsNullOrEmpty(exeName)) return res;
             bool isExplorer = string.Equals(exeName, "explorer", StringComparison.OrdinalIgnoreCase);
             bool isWt = string.Equals(exeName, "wt", StringComparison.OrdinalIgnoreCase);
 
             for (int i = 0; i < wins.Count; i++)
             {
                 OpenWindowInfo w = wins[i];
+                if (isAppsFolder)
+                {
+                    if (!string.IsNullOrEmpty(w.AppUserModelId) &&
+                        string.Equals(w.AppUserModelId, pinnedAumid, StringComparison.OrdinalIgnoreCase))
+                        res.Add(w);
+                    continue;
+                }
                 if (isExplorer)
                 {
                     if (string.Equals(w.ProcessName, "explorer", StringComparison.OrdinalIgnoreCase))
@@ -1478,7 +1499,12 @@ namespace Monolith
             try
             {
                 if (app != null && !string.IsNullOrEmpty(app.Path))
-                    Process.Start(new ProcessStartInfo(app.Path) { UseShellExecute = true });
+                {
+                    if (app.Path.StartsWith("shell:AppsFolder\\", StringComparison.OrdinalIgnoreCase))
+                        Process.Start(new ProcessStartInfo("explorer.exe", app.Path) { UseShellExecute = true });
+                    else
+                        Process.Start(new ProcessStartInfo(app.Path) { UseShellExecute = true });
+                }
             }
             catch { }
         }
@@ -2293,7 +2319,13 @@ namespace Monolith
             List<GlassMenuItemDef> items = new List<GlassMenuItemDef>();
             items.Add(new GlassMenuItemDef { IsHeader = true, Label = w.Title });
             items.Add(new GlassMenuItemDef { Label = L10n.T(_cfg, "Pencereyi Öne Getir", "Focus window"), Glyph = "\uE8A7", OnClick = delegate { ToggleFocusWindow(w.Handle); } });
-            if (!string.IsNullOrEmpty(w.ExePath))
+            string pinTarget = !string.IsNullOrEmpty(w.AppUserModelId)
+                ? ("shell:AppsFolder\\" + w.AppUserModelId)
+                : w.ExePath;
+            string pinName = !string.IsNullOrEmpty(w.AppUserModelId) && !string.IsNullOrEmpty(w.Title)
+                ? w.Title
+                : SystemTelemetry.CleanAppName(w.ProcessName);
+            if (!string.IsNullOrEmpty(pinTarget))
             {
                 items.Add(new GlassMenuItemDef
                 {
@@ -2303,9 +2335,9 @@ namespace Monolith
                     {
                         _cfg.PinnedApps.Add(new PinnedAppItem
                         {
-                            Name = SystemTelemetry.CleanAppName(w.ProcessName),
-                            Path = w.ExePath,
-                            IconPath = w.ExePath,
+                            Name = pinName,
+                            Path = pinTarget,
+                            IconPath = pinTarget,
                             Glyph = "\uE71D"
                         });
                         ConfigStore.Save(_cfg);

@@ -73,6 +73,8 @@ namespace Monolith
                     List<PinnedAppItem> found = new List<PinnedAppItem>();
                     HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
+                    NativeWin32.EnsureUninstallIconsLoaded();
+
                     string[] dirs = new string[]
                     {
                         Environment.GetFolderPath(Environment.SpecialFolder.CommonStartMenu),
@@ -135,14 +137,24 @@ namespace Monolith
                             path.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
                             continue;
 
+                        if (!File.Exists(path))
+                            NativeWin32.RegisterAppTitleAumid(name, path);
+
                         if (seen.Add(name))
                         {
                             bool realFile = File.Exists(path);
+                            string fullTarget = realFile ? path : ("shell:AppsFolder\\" + path);
+                            string iconTarget = fullTarget;
+                            if (!realFile)
+                            {
+                                string regIcon = NativeWin32.TryLookupRegisteredIconPath(name, path);
+                                if (!string.IsNullOrEmpty(regIcon)) iconTarget = regIcon;
+                            }
                             list.Add(new PinnedAppItem
                             {
                                 Name = name,
-                                Path = realFile ? path : ("shell:AppsFolder\\" + path),
-                                IconPath = realFile ? path : "",
+                                Path = fullTarget,
+                                IconPath = iconTarget,
                                 Glyph = "\uE71D"
                             });
                         }
@@ -281,7 +293,31 @@ namespace Monolith
                         continue;
 
                     if (seen.Add(name))
+                    {
+                        NativeWin32.RegisterAppTitleIconPath(name, f);
                         list.Add(new PinnedAppItem { Name = name, Path = f, IconPath = f, Glyph = "\uE71D" });
+                    }
+                }
+
+                // Also scan .url shortcuts (Steam / Epic / Ubisoft games) so their real IconFile= icons work!
+                string[] urls = Directory.GetFiles(dir, "*.url");
+                for (int i = 0; i < urls.Length; i++)
+                {
+                    string u = urls[i];
+                    string name = Path.GetFileNameWithoutExtension(u);
+                    if (string.IsNullOrEmpty(name)) continue;
+                    string norm = NormalizeSearch(name);
+                    if (norm.IndexOf("uninstall", StringComparison.Ordinal) >= 0 ||
+                        norm.IndexOf("kaldir", StringComparison.Ordinal) >= 0 ||
+                        norm.IndexOf("support", StringComparison.Ordinal) >= 0 ||
+                        norm.IndexOf("website", StringComparison.Ordinal) >= 0)
+                        continue;
+
+                    string urlIcon = NativeWin32.ReadUrlShortcutIconFile(u);
+                    if (!string.IsNullOrEmpty(urlIcon))
+                        NativeWin32.RegisterAppTitleIconPath(name, urlIcon);
+                    if (seen.Add(name))
+                        list.Add(new PinnedAppItem { Name = name, Path = u, IconPath = !string.IsNullOrEmpty(urlIcon) ? urlIcon : u, Glyph = "\uE7FC" });
                 }
                 string[] subDirs = Directory.GetDirectories(dir);
                 for (int i = 0; i < subDirs.Length; i++)
@@ -1414,11 +1450,11 @@ namespace Monolith
                 }
             }
 
-            AddBuiltInTool(list, seen, L10n.T(_cfg, "Ekran Alıntısı Aracı", "Snipping Tool"), "\uE7A8", "", "ms-screenclip:");
-            AddBuiltInTool(list, seen, L10n.T(_cfg, "Hesap Makinesi", "Calculator"), "\uE8EF", Path.Combine(Environment.SystemDirectory, "calc.exe"), "calc.exe");
-            AddBuiltInTool(list, seen, "Paint", "\uE790", Path.Combine(Environment.SystemDirectory, "mspaint.exe"), "mspaint.exe");
+            AddBuiltInTool(list, seen, L10n.T(_cfg, "Ekran Alıntısı Aracı", "Snipping Tool"), "\uE7A8", @"shell:AppsFolder\Microsoft.ScreenSketch_8wekyb3d8bbwe!App", "ms-screenclip:");
+            AddBuiltInTool(list, seen, L10n.T(_cfg, "Hesap Makinesi", "Calculator"), "\uE8EF", @"shell:AppsFolder\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App", "calc.exe");
+            AddBuiltInTool(list, seen, "Paint", "\uE790", @"shell:AppsFolder\Microsoft.Paint_8wekyb3d8bbwe!App", "mspaint.exe");
             AddBuiltInTool(list, seen, L10n.T(_cfg, "Görev Yöneticisi", "Task Manager"), "\uE9D9", Path.Combine(Environment.SystemDirectory, "Taskmgr.exe"), "taskmgr.exe");
-            AddBuiltInTool(list, seen, L10n.T(_cfg, "Windows Ayarları", "Windows Settings"), "\uE713", "", "ms-settings:");
+            AddBuiltInTool(list, seen, L10n.T(_cfg, "Windows Ayarları", "Windows Settings"), "\uE713", @"shell:AppsFolder\windows.immersivecontrolpanel_cw5n1h2txyewy!microsoft.windows.immersivecontrolpanel", "ms-settings:");
             AddBuiltInTool(list, seen, L10n.T(_cfg, "Monolith Ayarlar", "Monolith Settings"), "\uE713", "", null, _openSettings);
             return list;
         }
@@ -1428,9 +1464,9 @@ namespace Monolith
             List<SpotlightResult> list = new List<SpotlightResult>();
             HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-            AddBuiltInTool(list, seen, L10n.T(_cfg, "Ayarlar", "Settings"), "\uE713", "", "ms-settings:");
-            AddBuiltInTool(list, seen, L10n.T(_cfg, "Hesap Makinesi", "Calculator"), "\uE8EF", Path.Combine(Environment.SystemDirectory, "calc.exe"), "calc.exe");
-            AddBuiltInTool(list, seen, L10n.T(_cfg, "Ekran Alıntısı", "Snipping Tool"), "\uE7A8", "", "ms-screenclip:");
+            AddBuiltInTool(list, seen, L10n.T(_cfg, "Ayarlar", "Settings"), "\uE713", @"shell:AppsFolder\windows.immersivecontrolpanel_cw5n1h2txyewy!microsoft.windows.immersivecontrolpanel", "ms-settings:");
+            AddBuiltInTool(list, seen, L10n.T(_cfg, "Hesap Makinesi", "Calculator"), "\uE8EF", @"shell:AppsFolder\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App", "calc.exe");
+            AddBuiltInTool(list, seen, L10n.T(_cfg, "Ekran Alıntısı", "Snipping Tool"), "\uE7A8", @"shell:AppsFolder\Microsoft.ScreenSketch_8wekyb3d8bbwe!App", "ms-screenclip:");
 
             for (int i = 0; i < _cfg.PinnedApps.Count && list.Count < 6; i++)
             {
@@ -1451,21 +1487,23 @@ namespace Monolith
                 }
             }
             AddBuiltInTool(list, seen, L10n.T(_cfg, "Görev Yöneticisi", "Task Manager"), "\uE9D9", Path.Combine(Environment.SystemDirectory, "Taskmgr.exe"), "taskmgr.exe");
-            AddBuiltInTool(list, seen, L10n.T(_cfg, "Not Defteri", "Notepad"), "\uE70B", Path.Combine(Environment.SystemDirectory, "notepad.exe"), "notepad.exe");
+            AddBuiltInTool(list, seen, L10n.T(_cfg, "Not Defteri", "Notepad"), "\uE70B", @"shell:AppsFolder\Microsoft.WindowsNotepad_8wekyb3d8bbwe!App", "notepad.exe");
             return list;
         }
 
         private void AddBuiltInTool(List<SpotlightResult> list, HashSet<string> seen, string title, string glyph, string iconPath, string target, Action customAct = null)
         {
             if (!seen.Add(title)) return;
+            bool isAppsIcon = !string.IsNullOrEmpty(iconPath) && iconPath.StartsWith("shell:AppsFolder\\", StringComparison.OrdinalIgnoreCase);
+            bool hasFileIcon = !string.IsNullOrEmpty(iconPath) && File.Exists(iconPath);
             list.Add(new SpotlightResult
             {
                 Title = title,
                 Subtitle = L10n.T(_cfg, "Sistem Aracı", "System Tool"),
                 Category = "App",
                 Glyph = glyph,
-                IconPath = File.Exists(iconPath) ? iconPath : null,
-                FilePath = File.Exists(iconPath) ? iconPath : null,
+                IconPath = (isAppsIcon || hasFileIcon) ? iconPath : null,
+                FilePath = hasFileIcon ? iconPath : null,
                 Execute = customAct ?? (Action)delegate { LaunchTarget(target); }
             });
         }
