@@ -8,6 +8,24 @@
   <strong>Spatial Glass Desktop Dock & Live Widget Taskbar for Windows 10 & Windows 11</strong>
 </p>
 
+<p align="center">
+  <a href="https://github.com/monolth/Monolith/releases/latest">
+    <img src="https://img.shields.io/github/v/release/monolth/Monolith?style=for-the-badge&color=3B82F6&label=Download" alt="Latest Release" />
+  </a>
+  <a href="https://github.com/monolth/Monolith/actions/workflows/build.yml">
+    <img src="https://img.shields.io/github/actions/workflow/status/monolth/Monolith/build.yml?style=for-the-badge&label=Build" alt="Build Status" />
+  </a>
+  <a href="LICENSE">
+    <img src="https://img.shields.io/badge/License-MIT-22C55E?style=for-the-badge" alt="MIT License" />
+  </a>
+</p>
+
+## Download
+
+- **Installer (Recommended):** [Download MonolithSetup.exe](https://github.com/monolth/Monolith/releases/latest/download/MonolithSetup.exe)
+- **Portable (No Install):** [Download Monolith.exe](https://github.com/monolth/Monolith/releases/latest/download/Monolith.exe)
+- **All Releases:** [github.com/monolth/Monolith/releases](https://github.com/monolth/Monolith/releases)
+
 **Monolith** is a lightweight, open-source **Spatial Glass desktop dock & live widget taskbar** for Windows 10 and Windows 11, built natively in C# / WPF (.NET Framework 4.x) with zero external runtime or SDK dependencies.
 
 ## Features
@@ -43,6 +61,10 @@ powershell -ExecutionPolicy Bypass -File .\build.ps1
 # Build standalone MonolithSetup.exe installer
 powershell -ExecutionPolicy Bypass -File .\build_installer.ps1
 ```
+
+## Privacy & Security
+
+Monolith runs 100% locally on your Windows PC and does **not** collect telemetry, analytics, or personal data. Optional online widgets (Weather, Crypto/FX, GitHub Heatmap) only fetch public read-only API data when enabled.
 
 ## License
 
