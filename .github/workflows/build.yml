@@ -54,4 +54,4 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $tag = $env:GITHUB_REF_NAME
-          gh release create $tag Monolith.exe dist\MonolithSetup.exe --title "Monolith $tag" --notes "Monolith $tag release built automatically via GitHub Actions. Free code signing provided by SignPath.io, certificate by SignPath Foundation. See Code signing policy: https://github.com/monolth/Monolith#code-signing-policy"
+          gh release create $tag Monolith.exe dist\MonolithSetup.exe --title "Monolith $tag" --notes "Monolith $tag release built transparently from source via GitHub Actions."

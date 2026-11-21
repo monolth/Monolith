@@ -26,24 +26,23 @@
 - **Portable (No Install):** [Download Monolith.exe](https://github.com/monolth/Monolith/releases/latest/download/Monolith.exe)
 - **All Releases:** [github.com/monolth/Monolith/releases](https://github.com/monolth/Monolith/releases)
 
-To uninstall Monolith, use **Windows Settings → Apps → Installed Apps → Monolith → Uninstall**, or re-run `MonolithSetup.exe` / `MonolithUninstall.exe` to cleanly remove all files and restore the default Windows taskbar.
+> **Windows SmartScreen Note:** Monolith is an independent open-source project and the GitHub releases are currently unsigned, so Windows SmartScreen may show an *"Unknown publisher"* prompt on first launch (click **More info → Run anyway**). Every release is built transparently from this public repository via [GitHub Actions](https://github.com/monolth/Monolith/actions), or you can compile it locally from source in 5 seconds using `.\build.ps1`.
 
-*This project uses the [SignPath Foundation](https://signpath.org) for open-source code signing. See our [Code signing policy](#code-signing-policy) below.*
+To uninstall Monolith, use **Windows Settings → Apps → Installed Apps → Monolith → Uninstall**, or re-run `MonolithSetup.exe` / `MonolithUninstall.exe` to cleanly remove all files and restore the default Windows taskbar.
 
 **Monolith** is a lightweight, open-source **Spatial Glass desktop dock & live widget taskbar** for Windows 10 and Windows 11, built natively in C# / WPF (.NET Framework 4.x) with zero external runtime or SDK dependencies.
 
 ## Features
 
 - **Floating Capsule & Full-Width Windows 11 Taskbar Modes** — Use Monolith as a floating optical-glass stadium pill OR switch to Full-Width edge-to-edge mode with centered apps (Windows 11) or left-aligned apps and right-anchored widgets, clock & system controls.
-
 - **Spatial Glass Design & Real-Time Optical Refraction** — Full stadium-pill floating dock with live wallpaper lens refraction, glowing active indicators, **8 Themes** (*Spatial Glass, Prism Glass, Aurora Glass, Glacier Frost, Midnight, Obsidian Neon, Ceramic White, Clear*), **12 Dock Glass Color Tints** + Tint Strength control, and **18 Accent Colors** + Custom `#HEX` picker.
 - **18 Live Icon Glass Styles** — Switch instantly between *Squircle Glass, Circle Orb, Dark Crystal, Borderless, Sharp Prism, Glow Pedestal, Neon Ring, Double Glass, Wide Capsule, Ambient Aura, HUD Brackets, Diamond Crystal, Titanium Chrome, Hexagon Crystal, Holographic, Organic Leaf, Neumorphic Inset,* and *Dotted Tech* with live previews.
 - **Animated Dock Backgrounds & Interactive Region Cropper** — Upload looping `.gif`, `.mp4 / .wmv / .mov / .avi`, or static `.png / .jpg / .webp` files directly inside the dock capsule. Drag the live selection window over any part of an animated GIF/video/image to play that exact region with zero aspect-ratio distortion, use seamless side-by-side Tiling, or pick from 3 built-in GPU-animated presets (*Aurora Flow, Cyber Neon, Sunset Lava*). Auto-pauses in fullscreen games.
-- **Unified Windows Taskbar Experience** — Pinned apps and running windows merge cleanly with zero duplicates, active indicator pills, 60 FPS GPU DWM Live Window Previews with fast close (`✕`), Start button left-click (`Win`) + right-click Power User menu, anchored Windows Hidden Icons (`^`), and 1-click Windows Notifications (`Win+N`) & Show Desktop (`Win+D`).
-- **Integrated Windows 11 Search (`Ctrl + Shift + Space`)** — Anchored cleanly above Monolith (no taskbar overlap), powered by the Windows Search Index (`Search.CollatorDSO`), Start Menu & Registry app indexing, 18+ Windows `ms-settings:` shortcuts, live math calculator, and web search, plus automatic dock-dodge when native `Win+S` is used.
+- **Unified Windows Taskbar & High-Res Icon Engine** — Pinned apps and running windows merge cleanly with zero duplicates, full native 64×64 icon extraction for Microsoft Store / UWP apps, Steam games, and elevated Win32 apps, 60 FPS GPU DWM Live Window Previews with fast close (`✕`), Start button left-click (`Win`) + right-click Power User menu, anchored Windows Hidden Icons (`^`), and 1-click Windows Notifications (`Win+N`) & Show Desktop (`Win+D`).
+- **Integrated Windows 11 Search (`Ctrl + Shift + Space`)** — Anchored cleanly above Monolith (no taskbar overlap), indexing all installed Win32, Microsoft Store / UWP (`shell:AppsFolder`), and Steam apps alongside Windows Search Index files, 18+ `ms-settings:` shortcuts, live math calculator, and web search — while keeping native Windows `Win+S` and Start Menu search 100% functional.
 - **Customizable Windows 11 Control Center** — Edit in place with the `✎` button (or from Settings): switch between *Windows 11*, *Compact*, and *Glass Cards* styles, 3 corner shapes, S/M/L sizes, 12 reorderable quick action tiles, clickable Mute volume slider, WMI brightness slider, Now Playing media controls, and Power row.
 - **29 Live Modular Widgets** — Drag-and-drop widget ordering across Clocks, System, Media & Audio, Productivity, Weather, Finance, and AI & Developer categories.
-- **Crash-Safe Taskbar Restoration & Single-File Installer** — Always restores the native Windows taskbar on exit or crash, bundled as a self-contained `MonolithSetup.exe` installer and uninstaller.
+- **Zero-Bounce Native AppBar & Crash-Safe Restoration** — Supports *Smart Dodge*, *Reserve Space* (native Windows AppBar), and *Float Over* modes, and always restores the native Windows taskbar cleanly on exit or crash.
 
 ## Keyboard Shortcuts
 
@@ -66,22 +65,13 @@ powershell -ExecutionPolicy Bypass -File .\build.ps1
 powershell -ExecutionPolicy Bypass -File .\build_installer.ps1
 ```
 
-## Privacy policy
+## Privacy & Security
 
 This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.
 
-Monolith runs 100% locally on your Windows PC and does **not** collect telemetry, analytics, or personal data. Optional online widgets (Weather, Crypto/FX, GitHub Heatmap), if explicitly enabled by the user, only fetch public read-only data from their respective public APIs.
-
-## Code signing policy
-
-Free code signing provided by [SignPath.io](https://signpath.io), certificate by [SignPath Foundation](https://signpath.org).
-
-### Team roles
-- **Authors (Committers):** [@monolth](https://github.com/monolth)
-- **Reviewers:** [@monolth](https://github.com/monolth)
-- **Approvers:** [@monolth](https://github.com/monolth)
-
-All release binaries (`Monolith.exe` and `MonolithSetup.exe`) are built exclusively from this public source repository via automated GitHub Actions workflows (`.github/workflows/build.yml`) and require manual approval before signing.
+- Monolith runs **100% locally** on your Windows PC and collects **zero telemetry, analytics, or personal data**.
+- Optional online widgets (Weather, Crypto/FX, GitHub Heatmap), if explicitly enabled by the user, only fetch public read-only API data.
+- All release binaries (`Monolith.exe` and `MonolithSetup.exe`) are built directly from this public source repository via automated GitHub Actions workflows (`.github/workflows/build.yml`).
 
 ## License
 
