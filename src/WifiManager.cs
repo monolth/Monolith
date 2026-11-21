@@ -100,7 +100,129 @@ namespace Monolith
         private static extern uint WlanDisconnect(IntPtr hClientHandle, ref Guid pInterfaceGuid, IntPtr pReserved);
 
         [DllImport("wlanapi.dll")]
+        private static extern uint WlanQueryInterface(IntPtr hClientHandle, ref Guid pInterfaceGuid, int OpCode, IntPtr pReserved, out uint pdwDataSize, out IntPtr ppData, out int pWlanOpcodeValueType);
+
+        [DllImport("wlanapi.dll")]
+        private static extern uint WlanSetInterface(IntPtr hClientHandle, ref Guid pInterfaceGuid, int OpCode, uint dwDataSize, ref WLAN_PHY_RADIO_STATE pData, IntPtr pReserved);
+
+        [DllImport("wlanapi.dll")]
         private static extern void WlanFreeMemory(IntPtr pMemory);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct WLAN_PHY_RADIO_STATE
+        {
+            public uint dwPhyIndex;
+            public int dot11SoftwareRadioState; // 1 = On, 2 = Off
+            public int dot11HardwareRadioState;
+        }
+
+        private static bool _cachedWifiEnabled = true;
+
+        public static bool IsWifiEnabled()
+        {
+            try
+            {
+                uint ver;
+                IntPtr hClient;
+                if (WlanOpenHandle(2, IntPtr.Zero, out ver, out hClient) == 0 && hClient != IntPtr.Zero)
+                {
+                    try
+                    {
+                        IntPtr pIfList;
+                        if (WlanEnumInterfaces(hClient, IntPtr.Zero, out pIfList) == 0 && pIfList != IntPtr.Zero)
+                        {
+                            try
+                            {
+                                int ifCount = Marshal.ReadInt32(pIfList, 0);
+                                if (ifCount == 0) return _cachedWifiEnabled;
+                                int ifSize = Marshal.SizeOf(typeof(WLAN_INTERFACE_INFO));
+                                for (int i = 0; i < ifCount; i++)
+                                {
+                                    IntPtr pIf = new IntPtr(pIfList.ToInt64() + 8 + i * ifSize);
+                                    WLAN_INTERFACE_INFO info = (WLAN_INTERFACE_INFO)Marshal.PtrToStructure(pIf, typeof(WLAN_INTERFACE_INFO));
+                                    uint dataSize;
+                                    IntPtr pData;
+                                    int valType;
+                                    // wlan_intf_opcode_radio_state = 5
+                                    if (WlanQueryInterface(hClient, ref info.InterfaceGuid, 5, IntPtr.Zero, out dataSize, out pData, out valType) == 0 && pData != IntPtr.Zero)
+                                    {
+                                        try
+                                        {
+                                            int phyCount = Marshal.ReadInt32(pData, 0);
+                                            if (phyCount > 0)
+                                            {
+                                                int swState = Marshal.ReadInt32(pData, 8);
+                                                int hwState = Marshal.ReadInt32(pData, 12);
+                                                _cachedWifiEnabled = (swState != 2 && hwState != 2);
+                                                return _cachedWifiEnabled;
+                                            }
+                                        }
+                                        finally { WlanFreeMemory(pData); }
+                                    }
+                                }
+                            }
+                            finally { WlanFreeMemory(pIfList); }
+                        }
+                    }
+                    finally { WlanCloseHandle(hClient, IntPtr.Zero); }
+                }
+            }
+            catch { }
+            return _cachedWifiEnabled;
+        }
+
+        public static void SetWifiEnabledAsync(bool enable, Action<bool> onDone)
+        {
+            _cachedWifiEnabled = enable;
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                bool ok = false;
+                try
+                {
+                    uint ver;
+                    IntPtr hClient;
+                    if (WlanOpenHandle(2, IntPtr.Zero, out ver, out hClient) == 0 && hClient != IntPtr.Zero)
+                    {
+                        try
+                        {
+                            IntPtr pIfList;
+                            if (WlanEnumInterfaces(hClient, IntPtr.Zero, out pIfList) == 0 && pIfList != IntPtr.Zero)
+                            {
+                                try
+                                {
+                                    int ifCount = Marshal.ReadInt32(pIfList, 0);
+                                    int ifSize = Marshal.SizeOf(typeof(WLAN_INTERFACE_INFO));
+                                    for (int i = 0; i < ifCount; i++)
+                                    {
+                                        IntPtr pIf = new IntPtr(pIfList.ToInt64() + 8 + i * ifSize);
+                                        WLAN_INTERFACE_INFO info = (WLAN_INTERFACE_INFO)Marshal.PtrToStructure(pIf, typeof(WLAN_INTERFACE_INFO));
+                                        WLAN_PHY_RADIO_STATE state = new WLAN_PHY_RADIO_STATE();
+                                        state.dwPhyIndex = 0;
+                                        state.dot11SoftwareRadioState = enable ? 1 : 2;
+                                        state.dot11HardwareRadioState = enable ? 1 : 2;
+                                        uint rc = WlanSetInterface(hClient, ref info.InterfaceGuid, 5, (uint)Marshal.SizeOf(typeof(WLAN_PHY_RADIO_STATE)), ref state, IntPtr.Zero);
+                                        if (rc == 0) ok = true;
+                                        else if (!enable)
+                                        {
+                                            WlanDisconnect(hClient, ref info.InterfaceGuid, IntPtr.Zero);
+                                        }
+                                    }
+                                }
+                                finally { WlanFreeMemory(pIfList); }
+                            }
+                        }
+                        finally { WlanCloseHandle(hClient, IntPtr.Zero); }
+                    }
+                    if (!ok && !enable)
+                    {
+                        RunNetsh("wlan disconnect");
+                        ok = true;
+                    }
+                }
+                catch { }
+                if (onDone != null) onDone(ok);
+            });
+        }
 
         public static string GetQuickConnectedSsid()
         {

@@ -127,7 +127,7 @@ namespace Monolith
             CcShowVolume = true;
             CcShowMedia = true;
             CcShowPowerRow = true;
-            CcActiveTiles = new List<string> { "wifi", "bluetooth", "nightlight", "focus", "display", "snip" };
+            CcActiveTiles = new List<string> { "wifi", "bluetooth", "sound_output", "display", "nightlight", "focus" };
             DockSize = "M";
             IsTop = false;
             FullWidth = false;
@@ -318,11 +318,22 @@ namespace Monolith
             if (cfg.CcColumns < 2 || cfg.CcColumns > 3) cfg.CcColumns = 3;
             if (cfg.CcActiveTiles == null || cfg.CcActiveTiles.Count == 0)
             {
-                cfg.CcActiveTiles = new List<string> { "wifi", "bluetooth", "nightlight", "focus", "display", "snip" };
+                cfg.CcActiveTiles = new List<string> { "wifi", "bluetooth", "sound_output", "display", "nightlight", "focus" };
                 cfg.CcShowBrightness = true;
                 cfg.CcShowVolume = true;
                 cfg.CcShowMedia = true;
                 cfg.CcShowPowerRow = true;
+            }
+            else if (cfg.CcActiveTiles.Count == 6 &&
+                     cfg.CcActiveTiles.Contains("wifi") &&
+                     cfg.CcActiveTiles.Contains("bluetooth") &&
+                     cfg.CcActiveTiles.Contains("display") &&
+                     cfg.CcActiveTiles.Contains("snip") &&
+                     !cfg.CcActiveTiles.Contains("sound_output"))
+            {
+                // Migrate legacy default 6-tile set so all 4 split-button tiles (wifi, bluetooth, sound_output, display) appear on main grid
+                int snipIdx = cfg.CcActiveTiles.IndexOf("snip");
+                if (snipIdx >= 0) cfg.CcActiveTiles[snipIdx] = "sound_output";
             }
             if (string.IsNullOrEmpty(cfg.DockSize)) cfg.DockSize = "M";
             if (string.IsNullOrEmpty(cfg.FullWidthAlign)) cfg.FullWidthAlign = "Center";

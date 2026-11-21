@@ -1,9 +1,9 @@
 ﻿using System;
 using System.Diagnostics;
 using System.IO;
-using System.IO.Compression;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Runtime.InteropServices.ComTypes;
 using System.Text;
 using System.Threading;
 using Microsoft.Win32;
@@ -32,9 +32,38 @@ namespace MonolithSetup
 
     internal static class InstallerCore
     {
-        public const string AppVersion = "1.0.6";
+        public const string AppVersion = "1.0.8";
         private const string UninstallRegPath = @"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Monolith";
         private const string RunRegPath = @"SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
+
+        [ComImport]
+        [Guid("00021401-0000-0000-C000-000000000046")]
+        private class ShellLinkComObject { }
+
+        [ComImport]
+        [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        [Guid("000214F9-0000-0000-C000-000000000046")]
+        private interface IShellLinkW
+        {
+            void GetPath([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder pszFile, int cchMaxPath, IntPtr pfd, int fFlags);
+            void GetIDList(out IntPtr ppidl);
+            void SetIDList(IntPtr pidl);
+            void GetDescription([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder pszName, int cchMaxName);
+            void SetDescription([MarshalAs(UnmanagedType.LPWStr)] string pszName);
+            void GetWorkingDirectory([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder pszDir, int cchMaxPath);
+            void SetWorkingDirectory([MarshalAs(UnmanagedType.LPWStr)] string pszDir);
+            void GetArguments([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder pszArgs, int cchMaxPath);
+            void SetArguments([MarshalAs(UnmanagedType.LPWStr)] string pszArgs);
+            void GetHotkey(out short pwHotkey);
+            void SetHotkey(short wHotkey);
+            void GetShowCmd(out int piShowCmd);
+            void SetShowCmd(int iShowCmd);
+            void GetIconLocation([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder pszIconPath, int cchIconPath, out int piIcon);
+            void SetIconLocation([MarshalAs(UnmanagedType.LPWStr)] string pszIconPath, int iIcon);
+            void SetRelativePath([MarshalAs(UnmanagedType.LPWStr)] string pszPathRel, int dwReserved);
+            void Resolve(IntPtr hwnd, int fFlags);
+            void SetPath([MarshalAs(UnmanagedType.LPWStr)] string pszFile);
+        }
 
         private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
@@ -142,7 +171,7 @@ namespace MonolithSetup
             string targetUninstaller = Path.Combine(opts.InstallDir, "MonolithUninstall.exe");
 
             if (onProgress != null) onProgress(48, "Monolith v" + AppVersion + " dosyaları çıkarılıyor...");
-            ExtractGzipResource("MonolithPayload.exe.gz", targetExe);
+            ExtractRawResource("MonolithPayload.exe", targetExe);
             ExtractRawResource("MonolithIcon.ico", targetIco);
 
             if (onProgress != null) onProgress(65, "Kaldırma aracı (Uninstaller) yapılandırılıyor...");
@@ -219,7 +248,6 @@ namespace MonolithSetup
             {
                 TryDeleteFile(Path.Combine(installDir, "Monolith.exe"));
                 TryDeleteFile(Path.Combine(installDir, "monolith.ico"));
-                ScheduleSelfFolderCleanup(installDir);
             }
 
             RestoreWindowsTaskbar();
@@ -229,45 +257,6 @@ namespace MonolithSetup
         private static void TryDeleteFile(string path)
         {
             try { if (File.Exists(path)) File.Delete(path); } catch { }
-        }
-
-        private static void ScheduleSelfFolderCleanup(string dir)
-        {
-            try
-            {
-                string self = Process.GetCurrentProcess().MainModule.FileName;
-                string fullDir = Path.GetFullPath(dir).TrimEnd('\\');
-                if (Path.GetFullPath(self).StartsWith(fullDir, StringComparison.OrdinalIgnoreCase))
-                {
-                    // Spawn tiny detached cmd to remove MonolithUninstall.exe and empty folder right after exit
-                    string args = "/C ping -n 3 127.0.0.1 >nul & rd /s /q \"" + fullDir + "\"";
-                    ProcessStartInfo psi = new ProcessStartInfo("cmd.exe", args);
-                    psi.CreateNoWindow = true;
-                    psi.UseShellExecute = false;
-                    psi.WindowStyle = ProcessWindowStyle.Hidden;
-                    Process.Start(psi);
-                }
-                else
-                {
-                    try { Directory.Delete(fullDir, true); } catch { }
-                }
-            }
-            catch { }
-        }
-
-        private static void ExtractGzipResource(string resName, string destPath)
-        {
-            Assembly asm = Assembly.GetExecutingAssembly();
-            using (Stream s = asm.GetManifestResourceStream(resName))
-            {
-                if (s == null)
-                    throw new InvalidOperationException("Gömülü kurulum paketi bulunamadı: " + resName);
-                using (GZipStream gz = new GZipStream(s, CompressionMode.Decompress))
-                using (FileStream fs = new FileStream(destPath, FileMode.Create, FileAccess.Write))
-                {
-                    gz.CopyTo(fs);
-                }
-            }
         }
 
         private static void ExtractRawResource(string resName, string destPath)
@@ -287,65 +276,30 @@ namespace MonolithSetup
         {
             try
             {
-                Type shellType = Type.GetTypeFromProgID("WScript.Shell");
-                if (shellType == null) return;
-                object shell = Activator.CreateInstance(shellType);
-                object shortcut = shellType.InvokeMember("CreateShortcut", BindingFlags.InvokeMethod, null, shell, new object[] { lnkPath });
-                Type scType = shortcut.GetType();
-                scType.InvokeMember("TargetPath", BindingFlags.SetProperty, null, shortcut, new object[] { targetPath });
-                scType.InvokeMember("Arguments", BindingFlags.SetProperty, null, shortcut, new object[] { args ?? "" });
-                scType.InvokeMember("WorkingDirectory", BindingFlags.SetProperty, null, shortcut, new object[] { workDir });
+                IShellLinkW link = (IShellLinkW)new ShellLinkComObject();
+                link.SetPath(targetPath);
+                link.SetArguments(args ?? "");
+                link.SetWorkingDirectory(workDir ?? "");
+                link.SetDescription(desc ?? "Monolith");
                 if (!string.IsNullOrEmpty(iconPath) && File.Exists(iconPath))
-                    scType.InvokeMember("IconLocation", BindingFlags.SetProperty, null, shortcut, new object[] { iconPath + ",0" });
-                scType.InvokeMember("Description", BindingFlags.SetProperty, null, shortcut, new object[] { desc ?? "Monolith" });
-                scType.InvokeMember("Save", BindingFlags.InvokeMethod, null, shortcut, null);
-                Marshal.ReleaseComObject(shortcut);
-                Marshal.ReleaseComObject(shell);
+                    link.SetIconLocation(iconPath, 0);
+                IPersistFile file = (IPersistFile)link;
+                file.Save(lnkPath, false);
             }
             catch { }
-        }
-
-        private static bool RunHiddenSchtasks(string args)
-        {
-            try
-            {
-                ProcessStartInfo psi = new ProcessStartInfo("schtasks.exe", args);
-                psi.CreateNoWindow = true;
-                psi.UseShellExecute = false;
-                psi.WindowStyle = ProcessWindowStyle.Hidden;
-                using (Process p = Process.Start(psi))
-                {
-                    if (p == null) return false;
-                    p.WaitForExit(3500);
-                    return p.ExitCode == 0;
-                }
-            }
-            catch { return false; }
         }
 
         private static void SetStartupRegistry(bool enable, string exePath)
         {
             try
             {
-                if (!enable || string.IsNullOrEmpty(exePath))
-                {
-                    RunHiddenSchtasks("/Delete /TN \"MonolithInstantBoot\" /F");
-                    using (RegistryKey key = Registry.CurrentUser.OpenSubKey(RunRegPath, true))
-                    {
-                        if (key != null) key.DeleteValue("Monolith", false);
-                    }
-                    return;
-                }
-
-                // Prefer instant boot Scheduled Task (zero Windows 11 Run-key logon delay!), fallback to HKCU\Run
-                bool taskOk = RunHiddenSchtasks("/Create /TN \"MonolithInstantBoot\" /TR \"\\\"" + exePath + "\\\"\" /SC ONLOGON /RL LIMITED /F");
                 using (RegistryKey key = Registry.CurrentUser.OpenSubKey(RunRegPath, true))
                 {
                     if (key == null) return;
-                    if (taskOk)
-                        key.DeleteValue("Monolith", false);
+                    if (enable && !string.IsNullOrEmpty(exePath))
+                        key.SetValue("Monolith", "\"" + exePath + "\" --fastboot");
                     else
-                        key.SetValue("Monolith", "\"" + exePath + "\"");
+                        key.DeleteValue("Monolith", false);
                 }
             }
             catch { }

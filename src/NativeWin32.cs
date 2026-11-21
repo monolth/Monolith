@@ -2146,62 +2146,21 @@ namespace Monolith
             return null;
         }
 
-        private const string FastStartupTaskName = "MonolithInstantBoot";
-
-        private static bool RunHiddenSchtasks(string args)
-        {
-            try
-            {
-                ProcessStartInfo psi = new ProcessStartInfo("schtasks.exe", args);
-                psi.CreateNoWindow = true;
-                psi.UseShellExecute = false;
-                psi.WindowStyle = ProcessWindowStyle.Hidden;
-                using (Process p = Process.Start(psi))
-                {
-                    if (p == null) return false;
-                    p.WaitForExit(3500);
-                    return p.ExitCode == 0;
-                }
-            }
-            catch { return false; }
-        }
-
-        public static void SetStartupEnabled(bool enable, bool fastTaskScheduler)
+        public static void SetStartupEnabled(bool enable, bool fastBootMode)
         {
             try
             {
                 string exe = Process.GetCurrentProcess().MainModule.FileName;
-                if (!enable)
-                {
-                    RunHiddenSchtasks("/Delete /TN \"" + FastStartupTaskName + "\" /F");
-                    using (RegistryKey key = Registry.CurrentUser.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Run", true))
-                    {
-                        if (key != null) key.DeleteValue("Monolith", false);
-                    }
-                    return;
-                }
-
-                if (fastTaskScheduler)
-                {
-                    // Instant boot via user-level Task Scheduler (bypasses Windows 11 ~10s HKCU\Run logon delay!)
-                    bool taskOk = RunHiddenSchtasks("/Create /TN \"" + FastStartupTaskName + "\" /TR \"\\\"" + exe + "\\\"\" /SC ONLOGON /RL LIMITED /F");
-                    if (taskOk)
-                    {
-                        using (RegistryKey key = Registry.CurrentUser.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Run", true))
-                        {
-                            if (key != null) key.DeleteValue("Monolith", false);
-                        }
-                        return;
-                    }
-                }
-                else
-                {
-                    RunHiddenSchtasks("/Delete /TN \"" + FastStartupTaskName + "\" /F");
-                }
-
                 using (RegistryKey key = Registry.CurrentUser.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Run", true))
                 {
-                    if (key != null) key.SetValue("Monolith", "\"" + exe + "\"");
+                    if (key == null) return;
+                    if (!enable)
+                    {
+                        key.DeleteValue("Monolith", false);
+                        return;
+                    }
+                    string val = fastBootMode ? ("\"" + exe + "\" --fastboot") : ("\"" + exe + "\"");
+                    key.SetValue("Monolith", val);
                 }
             }
             catch { }
@@ -2214,12 +2173,6 @@ namespace Monolith
 
         public static bool IsStartupEnabled()
         {
-            try
-            {
-                if (RunHiddenSchtasks("/Query /TN \"" + FastStartupTaskName + "\""))
-                    return true;
-            }
-            catch { }
             try
             {
                 using (RegistryKey key = Registry.CurrentUser.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Run", false))

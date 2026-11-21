@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Diagnostics;
 using System.Threading;
 using System.Windows;
 using Microsoft.Win32;
@@ -10,8 +11,20 @@ namespace Monolith
         private static Mutex _singleInstance;
 
         [STAThread]
-        public static void Main()
+        public static void Main(string[] args)
         {
+            if (args != null)
+            {
+                for (int i = 0; i < args.Length; i++)
+                {
+                    if (string.Equals(args[i], "--restore-taskbar", StringComparison.OrdinalIgnoreCase))
+                    {
+                        StopOtherInstancesAndRestoreTaskbar();
+                        return;
+                    }
+                }
+            }
+
             bool createdNew;
             _singleInstance = new Mutex(true, "Monolith_SingleInstance_v1_Mutex", out createdNew);
             if (!createdNew)
@@ -51,6 +64,32 @@ namespace Monolith
                     _singleInstance.Dispose();
                 }
             }
+        }
+
+        private static void StopOtherInstancesAndRestoreTaskbar()
+        {
+            int selfPid = Process.GetCurrentProcess().Id;
+            try
+            {
+                Process[] procs = Process.GetProcessesByName("Monolith");
+                for (int i = 0; i < procs.Length; i++)
+                {
+                    using (Process p = procs[i])
+                    {
+                        if (p.Id == selfPid) continue;
+                        try
+                        {
+                            p.CloseMainWindow();
+                            if (!p.WaitForExit(1400))
+                                p.Kill();
+                            p.WaitForExit(1000);
+                        }
+                        catch { }
+                    }
+                }
+            }
+            catch { }
+            NativeWin32.RestoreNativeTaskbars();
         }
     }
 }

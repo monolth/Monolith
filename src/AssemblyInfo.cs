@@ -4,5 +4,5 @@
 [assembly: AssemblyDescription("Spatial Glass Desktop Dock & Live Widget Bar for Windows")]
 [assembly: AssemblyCompany("Monolith")]
 [assembly: AssemblyProduct("Monolith")]
-[assembly: AssemblyVersion("1.0.6.0")]
-[assembly: AssemblyFileVersion("1.0.6.0")]
+[assembly: AssemblyVersion("1.0.8.0")]
+[assembly: AssemblyFileVersion("1.0.8.0")]

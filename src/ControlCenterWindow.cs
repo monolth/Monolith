@@ -21,28 +21,27 @@ namespace Monolith
     }
 
     /// <summary>
-    /// Windows-Taskbar-inspired customizable Control Center for Monolith.
-    /// Supports 3 visual shapes (Windows 11, Compact, Glass Cards), 3 corner styles, S/M/L widths,
-    /// 2 or 3 columns, 12 selectable/reorderable quick action tiles, inline Edit Mode (pencil button),
-    /// real WMI brightness slider, real Core Audio master volume slider with 1-click mute,
-    /// Now Playing media strip, and quick Power row.
+    /// Windows-11-inspired customizable Control Center for Monolith.
+    /// Features split-button Quick Settings tiles (Left click = instant toggle, Right '>' click = inline sub-view)
+    /// for Wi-Fi, Bluetooth, Display Projection (Yansıt), and Sound Output, plus '>' on the Volume Slider row.
+    /// Zero external Windows Settings windows are opened; all actions run inline via native Windows APIs.
     /// </summary>
     public class ControlCenterWindow : Window
     {
         public static readonly List<ControlCenterTileDef> AllTiles = new List<ControlCenterTileDef>
         {
-            new ControlCenterTileDef { Id = "wifi",          Glyph = "\uE701", NameTr = "Wi-Fi",           NameEn = "Wi-Fi",         SubTr = "Ağ Ayarları",   SubEn = "Network",       AccentDefault = true },
+            new ControlCenterTileDef { Id = "wifi",          Glyph = "\uE701", NameTr = "Wi-Fi",           NameEn = "Wi-Fi",         SubTr = "Kablosuz Ağ",   SubEn = "Wireless",      AccentDefault = true },
             new ControlCenterTileDef { Id = "bluetooth",     Glyph = "\uE702", NameTr = "Bluetooth",       NameEn = "Bluetooth",     SubTr = "Cihazlar",      SubEn = "Devices",       AccentDefault = true },
             new ControlCenterTileDef { Id = "nightlight",    Glyph = "\uE793", NameTr = "Gece Işığı",      NameEn = "Night Light",   SubTr = "Göz Konforu",   SubEn = "Warm Screen",   AccentDefault = false },
             new ControlCenterTileDef { Id = "focus",         Glyph = "\uE708", NameTr = "Odaklanma",       NameEn = "Focus Assist",  SubTr = "Rahatsız Etme", SubEn = "Do Not Disturb",AccentDefault = false },
-            new ControlCenterTileDef { Id = "display",       Glyph = "\uE7F4", NameTr = "Yansıt",          NameEn = "Project",       SubTr = "Win + P",       SubEn = "Win + P",       AccentDefault = false },
+            new ControlCenterTileDef { Id = "display",       Glyph = "\uE7F4", NameTr = "Yansıt",          NameEn = "Project",       SubTr = "Ekran Modu",    SubEn = "Display Mode",  AccentDefault = false },
             new ControlCenterTileDef { Id = "snip",          Glyph = "\uE7A8", NameTr = "Ekran Alıntısı",  NameEn = "Snip Screen",   SubTr = "Hızlı Yakala",  SubEn = "Capture",       AccentDefault = false },
             new ControlCenterTileDef { Id = "airplane",      Glyph = "\uE709", NameTr = "Uçak Modu",       NameEn = "Airplane Mode", SubTr = "Kablosuz",      SubEn = "Wireless",      AccentDefault = false },
-            new ControlCenterTileDef { Id = "sound_output",  Glyph = "\uE7F5", NameTr = "Ses Çıkışı",      NameEn = "Sound Output",  SubTr = "Hoparlör/Kul.", SubEn = "Speakers",      AccentDefault = false },
+            new ControlCenterTileDef { Id = "sound_output",  Glyph = "\uE7F5", NameTr = "Ses Çıkışı",      NameEn = "Sound Output",  SubTr = "Hoparlör/Kul.", SubEn = "Speakers",      AccentDefault = true },
             new ControlCenterTileDef { Id = "taskview",      Glyph = "\uE7C4", NameTr = "Pencereler",      NameEn = "Task View",     SubTr = "Win + Tab",     SubEn = "Win + Tab",     AccentDefault = false },
-            new ControlCenterTileDef { Id = "battery_saver", Glyph = "\uE83F", NameTr = "Pil & Güç",       NameEn = "Power & Batt.", SubTr = "Güç Modu",      SubEn = "Power Mode",    AccentDefault = false },
+            new ControlCenterTileDef { Id = "battery_saver", Glyph = "\uE83F", NameTr = "Pil Tasarrufu",   NameEn = "Battery Saver", SubTr = "Güç Modu",      SubEn = "Power Mode",    AccentDefault = false },
             new ControlCenterTileDef { Id = "taskmgr",       Glyph = "\uE9D9", NameTr = "Görev Yön.",      NameEn = "Task Manager",  SubTr = "Performans",    SubEn = "Performance",   AccentDefault = false },
-            new ControlCenterTileDef { Id = "settings",      Glyph = "\uE713", NameTr = "Win Ayarları",    NameEn = "Win Settings",  SubTr = "Sistem",        SubEn = "System",        AccentDefault = false }
+            new ControlCenterTileDef { Id = "settings",      Glyph = "\uE713", NameTr = "Ayarlar",         NameEn = "Settings",      SubTr = "Monolith",      SubEn = "Monolith",      AccentDefault = false }
         };
 
         private readonly FrameworkElement _anchor;
@@ -55,12 +54,31 @@ namespace Monolith
 
         private Border _shell;
         private bool _editMode = false;
-        private bool _wifiViewOpen = false;
+        private string _activeSubView = null; // null, "wifi", "bluetooth", "sound_output", "display"
+
+        // Wi-Fi state
+        private bool _wifiEnabled = true;
         private bool _wifiLoading = false;
         private WifiScanResult _wifiScan = null;
         private string _expandedWifiSsid = null;
+        private bool _showManualWifiInput = false;
         private string _wifiStatusMsg = null;
         private string _connectedSsidPreview = null;
+
+        // Bluetooth state
+        private bool _btEnabled = true;
+        private bool _btLoading = false;
+        private BluetoothScanResult _btScan = null;
+        private string _btStatusMsg = null;
+
+        // Audio output state
+        private List<AudioOutputDeviceInfo> _audioDevices = new List<AudioOutputDeviceInfo>();
+        private string _activeAudioShortName = null;
+        private string _audioStatusMsg = null;
+
+        // Display project state
+        private string _displayStatusMsg = null;
+
         private bool _suppressDeactivate = false;
 
         public ControlCenterWindow(
@@ -100,18 +118,23 @@ namespace Monolith
 
             RebuildUI();
 
-            // Fetch active Wi-Fi SSID name & live media asynchronously so Control Center opens in <5ms
+            // Asynchronously populate live Wi-Fi SSID, radio states, and active Audio Output device name
             System.Threading.ThreadPool.QueueUserWorkItem(delegate
             {
-                string ssid = WifiManager.GetQuickConnectedSsid();
-                if (!string.IsNullOrEmpty(ssid))
+                bool wfOn = WifiManager.IsWifiEnabled();
+                string ssid = wfOn ? WifiManager.GetQuickConnectedSsid() : null;
+                bool btOn = BluetoothManager.IsBluetoothEnabled();
+                string audName = AudioDeviceManager.GetDefaultOutputShortName();
+
+                Dispatcher.BeginInvoke(new Action(delegate
                 {
-                    Dispatcher.BeginInvoke(new Action(delegate
-                    {
-                        _connectedSsidPreview = ssid;
-                        if (!_wifiViewOpen && IsLoaded) RebuildUI();
-                    }));
-                }
+                    _wifiEnabled = wfOn;
+                    _connectedSsidPreview = ssid;
+                    _btEnabled = btOn;
+                    _activeAudioShortName = audName;
+                    if (string.IsNullOrEmpty(_activeSubView) && IsLoaded)
+                        RebuildUI();
+                }));
             });
 
             Deactivated += delegate
@@ -125,13 +148,80 @@ namespace Monolith
             {
                 if (e.Key == Key.Escape)
                 {
-                    if (_wifiViewOpen) { _wifiViewOpen = false; _expandedWifiSsid = null; _wifiStatusMsg = null; RebuildUI(); }
-                    else if (_editMode) { _editMode = false; RebuildUI(); }
-                    else Close();
+                    if (!string.IsNullOrEmpty(_activeSubView))
+                    {
+                        CloseSubView();
+                    }
+                    else if (_editMode)
+                    {
+                        _editMode = false;
+                        RebuildUI();
+                    }
+                    else
+                    {
+                        Close();
+                    }
                 }
             };
             Loaded += delegate { PositionAtAnchor(); };
             SizeChanged += delegate { if (IsLoaded) PositionAtAnchor(); };
+        }
+
+        public void OpenSubView(string subViewId)
+        {
+            _editMode = false;
+            _activeSubView = subViewId;
+            if (subViewId == "wifi")
+            {
+                OpenWifiSubView(true);
+            }
+            else if (subViewId == "bluetooth")
+            {
+                OpenBluetoothSubView();
+            }
+            else if (subViewId == "sound_output")
+            {
+                OpenAudioOutputSubView();
+            }
+            else if (subViewId == "display")
+            {
+                _displayStatusMsg = null;
+                RebuildUI();
+            }
+            else
+            {
+                RebuildUI();
+            }
+        }
+
+        private void CloseSubView()
+        {
+            _activeSubView = null;
+            _expandedWifiSsid = null;
+            _showManualWifiInput = false;
+            _wifiStatusMsg = null;
+            _btStatusMsg = null;
+            _audioStatusMsg = null;
+            _displayStatusMsg = null;
+            RebuildUI();
+        }
+
+        private static bool HasSplitSubView(string id)
+        {
+            return id == "wifi" || id == "bluetooth" || id == "display" || id == "sound_output";
+        }
+
+        private bool IsTileActive(string id)
+        {
+            if (id == "wifi") return _wifiEnabled && !QuickToggleManager.IsAirplaneModeEnabled;
+            if (id == "bluetooth") return _btEnabled && !QuickToggleManager.IsAirplaneModeEnabled;
+            if (id == "display") return DisplayProjectManager.IsProjectionActive();
+            if (id == "sound_output") return !_tel.VolumeMuted;
+            if (id == "nightlight") return QuickToggleManager.IsNightLightEnabled;
+            if (id == "focus") return QuickToggleManager.IsFocusModeEnabled;
+            if (id == "airplane") return QuickToggleManager.IsAirplaneModeEnabled;
+            if (id == "battery_saver") return QuickToggleManager.IsBatterySaverEnabled || _cfg.LowResourceMode;
+            return false;
         }
 
         private double GetOuterRadius()
@@ -196,10 +286,28 @@ namespace Monolith
 
             StackPanel root = new StackPanel();
 
-            // Inline Windows 11 Wi-Fi Sub-View when user clicks the Wi-Fi tile!
-            if (_wifiViewOpen)
+            // Check if an inline sub-view is currently open inside the panel
+            if (_activeSubView == "wifi")
             {
                 BuildWifiSubView(root, tileR, compact);
+                _shell.Child = root;
+                return;
+            }
+            if (_activeSubView == "bluetooth")
+            {
+                BuildBluetoothSubView(root, tileR, compact);
+                _shell.Child = root;
+                return;
+            }
+            if (_activeSubView == "sound_output")
+            {
+                BuildAudioOutputSubView(root, tileR, compact);
+                _shell.Child = root;
+                return;
+            }
+            if (_activeSubView == "display")
+            {
+                BuildDisplayProjectSubView(root, tileR, compact);
                 _shell.Child = root;
                 return;
             }
@@ -255,11 +363,13 @@ namespace Monolith
                         tileR,
                         compact,
                         null,
-                        delegate(int val) { NativeWin32.SetScreenBrightness(val); }));
+                        delegate(int val) { NativeWin32.SetScreenBrightness(val); },
+                        null,
+                        null));
                 }
             }
 
-            // 4. Real Windows Master Volume Slider (clickable icon toggles Mute!)
+            // 4. Real Windows Master Volume Slider (Left icon toggles Mute, Right '>' opens Sound Output devices sub-view!)
             if (_cfg.CcShowVolume)
             {
                 root.Children.Add(BuildSliderRow(
@@ -281,7 +391,12 @@ namespace Monolith
                         _tel.VolumePercent = val;
                         _tel.VolumeMuted = (val == 0);
                         if (_onChanged != null) _onChanged();
-                    }));
+                    },
+                    delegate
+                    {
+                        OpenSubView("sound_output");
+                    },
+                    L10n.T(_cfg, "Ses Çıkış Cihazını Seç", "Select Sound Output Device")));
             }
 
             // 5. Now Playing Mini Card
@@ -359,7 +474,7 @@ namespace Monolith
                 root.Children.Add(pwr);
             }
 
-            // 7. Windows 11-style Bottom Footer Bar (Battery % on left, Edit Pencil + Win+A + Settings on right)
+            // 7. Windows 11-style Bottom Footer Bar (Battery % on left, Edit Pencil + Monolith Settings on right)
             Border footer = new Border
             {
                 BorderBrush = ThemeManager.Brush(_palette.DividerColor),
@@ -390,7 +505,7 @@ namespace Monolith
             });
             fdp.Children.Add(battSp);
 
-            // Right: Edit Pencil + Win Quick Settings + Monolith Settings
+            // Right: Edit Pencil + Monolith Settings
             StackPanel fBtns = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Center };
 
             Border editBtn = MakeFooterIconBtn("\uE70F", _editMode, L10n.T(_cfg, "Kontrol Merkezini Şekillendir", "Customize Control Center"), delegate
@@ -399,13 +514,6 @@ namespace Monolith
                 RebuildUI();
             });
             fBtns.Children.Add(editBtn);
-
-            Border winQuickBtn = MakeFooterIconBtn("\uE71D", false, L10n.T(_cfg, "Windows Hızlı Ayarlar (Win+A)", "Windows Quick Settings (Win+A)"), delegate
-            {
-                Close();
-                NativeWin32.OpenWindowsQuickSettings();
-            });
-            fBtns.Children.Add(winQuickBtn);
 
             Border setBtn = MakeFooterIconBtn("\uE713", false, L10n.T(_cfg, "Monolith Ayarlar", "Monolith Settings"), delegate
             {
@@ -428,25 +536,74 @@ namespace Monolith
             double padR = (col == cols - 1) ? 0 : 3.5;
             double padT = (row == 0) ? 0 : 3.5;
 
+            bool isActive = IsTileActive(def.Id);
+            bool hasSubView = HasSplitSubView(def.Id);
+
             string title = L10n.T(_cfg, def.NameTr, def.NameEn);
             string sub = L10n.T(_cfg, def.SubTr, def.SubEn);
-            if (def.Id == "wifi" && !string.IsNullOrEmpty(_connectedSsidPreview))
+
+            if (def.Id == "wifi")
             {
-                sub = _connectedSsidPreview;
-                if (!glassCards) title = _connectedSsidPreview;
+                if (!_wifiEnabled || QuickToggleManager.IsAirplaneModeEnabled)
+                {
+                    sub = L10n.T(_cfg, "Kapalı", "Off");
+                }
+                else if (!string.IsNullOrEmpty(_connectedSsidPreview))
+                {
+                    sub = _connectedSsidPreview;
+                    if (!glassCards) title = _connectedSsidPreview;
+                }
+            }
+            else if (def.Id == "bluetooth")
+            {
+                sub = (_btEnabled && !QuickToggleManager.IsAirplaneModeEnabled)
+                    ? L10n.T(_cfg, "Açık", "On")
+                    : L10n.T(_cfg, "Kapalı", "Off");
+            }
+            else if (def.Id == "sound_output" && !string.IsNullOrEmpty(_activeAudioShortName))
+            {
+                sub = _activeAudioShortName;
+            }
+            else if (def.Id == "display")
+            {
+                string curMode = DisplayProjectManager.GetCurrentMode();
+                for (int m = 0; m < DisplayProjectManager.Modes.Count; m++)
+                {
+                    if (DisplayProjectManager.Modes[m].ModeId == curMode)
+                    {
+                        sub = L10n.T(_cfg, DisplayProjectManager.Modes[m].TitleTr, DisplayProjectManager.Modes[m].TitleEn);
+                        break;
+                    }
+                }
             }
 
             Grid host = new Grid { Margin = new Thickness(padH, padT, padR, 3.5) };
+            string cid = def.Id;
 
             if (glassCards)
             {
                 Border card = new Border
                 {
                     CornerRadius = new CornerRadius(tileR),
-                    Background = ThemeManager.Brush(_palette.ModalSurface),
-                    BorderBrush = ThemeManager.Brush(_palette.ModalBorder),
-                    BorderThickness = new Thickness(1),
-                    Padding = new Thickness(10, 9, 10, 9),
+                    Background = isActive
+                        ? ThemeManager.Brush(Color.FromArgb(42, _palette.Accent.R, _palette.Accent.G, _palette.Accent.B))
+                        : ThemeManager.Brush(_palette.ModalSurface),
+                    BorderBrush = ThemeManager.Brush(isActive ? _palette.Accent : _palette.ModalBorder),
+                    BorderThickness = new Thickness(1)
+                };
+
+                Grid cg = new Grid();
+                cg.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+                if (hasSubView)
+                {
+                    cg.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1) });
+                    cg.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(32) });
+                }
+
+                Border leftZone = new Border
+                {
+                    Background = Brushes.Transparent,
+                    Padding = new Thickness(10, 9, hasSubView ? 6 : 10, 9),
                     Cursor = Cursors.Hand
                 };
                 StackPanel sp = new StackPanel { Orientation = Orientation.Horizontal };
@@ -455,7 +612,7 @@ namespace Monolith
                     Width = 30,
                     Height = 30,
                     CornerRadius = new CornerRadius(15),
-                    Background = def.AccentDefault
+                    Background = isActive
                         ? ThemeManager.Brush(_palette.Accent)
                         : ThemeManager.Brush(Color.FromArgb(42, 148, 163, 184)),
                     Margin = new Thickness(0, 0, 9, 0),
@@ -466,7 +623,7 @@ namespace Monolith
                     Text = def.Glyph,
                     FontFamily = new FontFamily("Segoe MDL2 Assets"),
                     FontSize = 13,
-                    Foreground = def.AccentDefault ? Brushes.White : ThemeManager.Brush(_palette.TextPrimary),
+                    Foreground = isActive ? Brushes.White : ThemeManager.Brush(_palette.TextPrimary),
                     HorizontalAlignment = HorizontalAlignment.Center,
                     VerticalAlignment = VerticalAlignment.Center
                 };
@@ -475,66 +632,182 @@ namespace Monolith
                 txt.Children.Add(new TextBlock { Text = sub, FontFamily = new FontFamily("Segoe UI"), FontSize = 9.8, Foreground = ThemeManager.Brush(_palette.TextMuted), TextTrimming = TextTrimming.CharacterEllipsis });
                 sp.Children.Add(badge);
                 sp.Children.Add(txt);
-                card.Child = sp;
+                leftZone.Child = sp;
 
-                card.MouseEnter += delegate { card.BorderBrush = ThemeManager.Brush(_palette.Accent); };
-                card.MouseLeave += delegate { card.BorderBrush = ThemeManager.Brush(_palette.ModalBorder); };
                 if (!_editMode)
                 {
-                    string cid = def.Id;
-                    card.MouseLeftButtonUp += delegate { ExecuteTileAction(cid); };
+                    leftZone.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e)
+                    {
+                        e.Handled = true;
+                        ExecuteTileLeftToggle(cid);
+                    };
                 }
+                Grid.SetColumn(leftZone, 0);
+                cg.Children.Add(leftZone);
+
+                if (hasSubView)
+                {
+                    Border div = new Border
+                    {
+                        Width = 1,
+                        Margin = new Thickness(0, 7, 0, 7),
+                        Background = ThemeManager.Brush(_palette.ModalBorder)
+                    };
+                    Grid.SetColumn(div, 1);
+                    cg.Children.Add(div);
+
+                    Border rightZone = new Border
+                    {
+                        Background = Brushes.Transparent,
+                        Cursor = Cursors.Hand,
+                        ToolTip = L10n.T(_cfg, title + " Listesini Aç", "Open " + title + " List")
+                    };
+                    rightZone.Child = new TextBlock
+                    {
+                        Text = "\uE76C",
+                        FontFamily = new FontFamily("Segoe MDL2 Assets"),
+                        FontSize = 10,
+                        Foreground = ThemeManager.Brush(_palette.TextPrimary),
+                        HorizontalAlignment = HorizontalAlignment.Center,
+                        VerticalAlignment = VerticalAlignment.Center
+                    };
+                    rightZone.MouseEnter += delegate { rightZone.Background = ThemeManager.Brush(Color.FromArgb(40, _palette.Accent.R, _palette.Accent.G, _palette.Accent.B)); };
+                    rightZone.MouseLeave += delegate { rightZone.Background = Brushes.Transparent; };
+                    if (!_editMode)
+                    {
+                        rightZone.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e)
+                        {
+                            e.Handled = true;
+                            OpenSubView(cid);
+                        };
+                    }
+                    Grid.SetColumn(rightZone, 2);
+                    cg.Children.Add(rightZone);
+                }
+
+                card.Child = cg;
+                card.MouseEnter += delegate { card.BorderBrush = ThemeManager.Brush(_palette.Accent); };
+                card.MouseLeave += delegate { card.BorderBrush = ThemeManager.Brush(isActive ? _palette.Accent : _palette.ModalBorder); };
                 host.Children.Add(card);
             }
             else
             {
-                // Authentic Windows 11 Quick Settings pill button + crisp centered caption!
+                // Authentic Windows 11 Quick Settings Split Pill Button + crisp centered caption!
                 StackPanel cell = new StackPanel();
                 Border pill = new Border
                 {
                     Height = compact ? 38 : 44,
                     CornerRadius = new CornerRadius(tileR),
-                    Background = def.AccentDefault
+                    Background = isActive
                         ? ThemeManager.Brush(_palette.Accent)
                         : ThemeManager.Brush(_palette.ModalSurface),
-                    BorderBrush = ThemeManager.Brush(def.AccentDefault ? _palette.Accent : _palette.ModalBorder),
-                    BorderThickness = new Thickness(1),
-                    Cursor = Cursors.Hand
+                    BorderBrush = ThemeManager.Brush(isActive ? _palette.Accent : _palette.ModalBorder),
+                    BorderThickness = new Thickness(1)
                 };
-                StackPanel pillRow = new StackPanel
+
+                if (hasSubView)
                 {
-                    Orientation = Orientation.Horizontal,
-                    HorizontalAlignment = HorizontalAlignment.Center,
-                    VerticalAlignment = VerticalAlignment.Center
-                };
-                pillRow.Children.Add(new TextBlock
-                {
-                    Text = def.Glyph,
-                    FontFamily = new FontFamily("Segoe MDL2 Assets"),
-                    FontSize = compact ? 14 : 15.5,
-                    Foreground = def.AccentDefault ? Brushes.White : ThemeManager.Brush(_palette.TextPrimary),
-                    VerticalAlignment = VerticalAlignment.Center
-                });
-                if (def.Id == "wifi")
-                {
-                    pillRow.Children.Add(new TextBlock
+                    Grid splitGrid = new Grid();
+                    splitGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+                    splitGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1) });
+                    splitGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(compact ? 30 : 34) });
+
+                    // Left half: click toggles ON/OFF directly
+                    Border leftBtn = new Border
+                    {
+                        Background = Brushes.Transparent,
+                        Cursor = Cursors.Hand,
+                        ToolTip = L10n.T(_cfg, title + " Aç / Kapat", "Toggle " + title)
+                    };
+                    leftBtn.Child = new TextBlock
+                    {
+                        Text = def.Glyph,
+                        FontFamily = new FontFamily("Segoe MDL2 Assets"),
+                        FontSize = compact ? 14 : 15.5,
+                        Foreground = isActive ? Brushes.White : ThemeManager.Brush(_palette.TextPrimary),
+                        HorizontalAlignment = HorizontalAlignment.Center,
+                        VerticalAlignment = VerticalAlignment.Center
+                    };
+                    leftBtn.MouseEnter += delegate { leftBtn.Background = ThemeManager.Brush(Color.FromArgb(28, 255, 255, 255)); };
+                    leftBtn.MouseLeave += delegate { leftBtn.Background = Brushes.Transparent; };
+                    if (!_editMode)
+                    {
+                        leftBtn.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e)
+                        {
+                            e.Handled = true;
+                            ExecuteTileLeftToggle(cid);
+                        };
+                    }
+                    Grid.SetColumn(leftBtn, 0);
+                    splitGrid.Children.Add(leftBtn);
+
+                    // Center 1px vertical divider
+                    Border divider = new Border
+                    {
+                        Width = 1,
+                        Margin = new Thickness(0, 7, 0, 7),
+                        Background = isActive
+                            ? ThemeManager.Brush(Color.FromArgb(75, 255, 255, 255))
+                            : ThemeManager.Brush(_palette.ModalBorder)
+                    };
+                    Grid.SetColumn(divider, 1);
+                    splitGrid.Children.Add(divider);
+
+                    // Right half ('>'): click opens inline sub-view!
+                    Border rightBtn = new Border
+                    {
+                        Background = Brushes.Transparent,
+                        Cursor = Cursors.Hand,
+                        ToolTip = L10n.T(_cfg, title + " Seçenekleri", title + " Options")
+                    };
+                    rightBtn.Child = new TextBlock
                     {
                         Text = "\uE76C",
                         FontFamily = new FontFamily("Segoe MDL2 Assets"),
-                        FontSize = 9,
-                        Foreground = def.AccentDefault ? ThemeManager.Brush(Color.FromArgb(205, 255, 255, 255)) : ThemeManager.Brush(_palette.TextMuted),
-                        VerticalAlignment = VerticalAlignment.Center,
-                        Margin = new Thickness(7, 0, 0, 0)
-                    });
+                        FontSize = compact ? 9.5 : 10.5,
+                        Foreground = isActive ? Brushes.White : ThemeManager.Brush(_palette.TextPrimary),
+                        HorizontalAlignment = HorizontalAlignment.Center,
+                        VerticalAlignment = VerticalAlignment.Center
+                    };
+                    rightBtn.MouseEnter += delegate { rightBtn.Background = ThemeManager.Brush(Color.FromArgb(40, 255, 255, 255)); };
+                    rightBtn.MouseLeave += delegate { rightBtn.Background = Brushes.Transparent; };
+                    if (!_editMode)
+                    {
+                        rightBtn.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e)
+                        {
+                            e.Handled = true;
+                            OpenSubView(cid);
+                        };
+                    }
+                    Grid.SetColumn(rightBtn, 2);
+                    splitGrid.Children.Add(rightBtn);
+
+                    pill.Child = splitGrid;
                 }
-                pill.Child = pillRow;
-                pill.MouseEnter += delegate { pill.Opacity = 0.86; };
-                pill.MouseLeave += delegate { pill.Opacity = 1.0; };
-                if (!_editMode)
+                else
                 {
-                    string cid = def.Id;
-                    pill.MouseLeftButtonUp += delegate { ExecuteTileAction(cid); };
+                    pill.Cursor = Cursors.Hand;
+                    pill.Child = new TextBlock
+                    {
+                        Text = def.Glyph,
+                        FontFamily = new FontFamily("Segoe MDL2 Assets"),
+                        FontSize = compact ? 14 : 15.5,
+                        Foreground = isActive ? Brushes.White : ThemeManager.Brush(_palette.TextPrimary),
+                        HorizontalAlignment = HorizontalAlignment.Center,
+                        VerticalAlignment = VerticalAlignment.Center
+                    };
+                    pill.MouseEnter += delegate { pill.Opacity = 0.86; };
+                    pill.MouseLeave += delegate { pill.Opacity = 1.0; };
+                    if (!_editMode)
+                    {
+                        pill.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e)
+                        {
+                            e.Handled = true;
+                            ExecuteTileLeftToggle(cid);
+                        };
+                    }
                 }
+
                 cell.Children.Add(pill);
 
                 cell.Children.Add(new TextBlock
@@ -751,7 +1024,7 @@ namespace Monolith
             SaveAndRebuild();
         }
 
-        private Border BuildSliderRow(string glyph, string title, int initial, double tileR, bool compact, Action onIconClick, Action<int> onVal)
+        private Border BuildSliderRow(string glyph, string title, int initial, double tileR, bool compact, Action onIconClick, Action<int> onVal, Action onChevronClick, string chevronTip)
         {
             Border card = new Border
             {
@@ -767,6 +1040,10 @@ namespace Monolith
             g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(28) });
             g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(36) });
+            if (onChevronClick != null)
+            {
+                g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(28) });
+            }
 
             Border iconBtn = new Border
             {
@@ -822,6 +1099,40 @@ namespace Monolith
             };
             Grid.SetColumn(pct, 2);
             g.Children.Add(pct);
+
+            if (onChevronClick != null)
+            {
+                Border chevBtn = new Border
+                {
+                    Width = 24,
+                    Height = 24,
+                    CornerRadius = new CornerRadius(7),
+                    Background = Brushes.Transparent,
+                    Margin = new Thickness(4, 0, 0, 0),
+                    Cursor = Cursors.Hand,
+                    VerticalAlignment = VerticalAlignment.Center,
+                    HorizontalAlignment = HorizontalAlignment.Right,
+                    ToolTip = chevronTip
+                };
+                chevBtn.Child = new TextBlock
+                {
+                    Text = "\uE76C",
+                    FontFamily = new FontFamily("Segoe MDL2 Assets"),
+                    FontSize = 10.5,
+                    Foreground = ThemeManager.Brush(_palette.TextPrimary),
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    VerticalAlignment = VerticalAlignment.Center
+                };
+                chevBtn.MouseEnter += delegate { chevBtn.Background = ThemeManager.Brush(Color.FromArgb(40, _palette.Accent.R, _palette.Accent.G, _palette.Accent.B)); };
+                chevBtn.MouseLeave += delegate { chevBtn.Background = Brushes.Transparent; };
+                chevBtn.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e)
+                {
+                    e.Handled = true;
+                    onChevronClick();
+                };
+                Grid.SetColumn(chevBtn, 3);
+                g.Children.Add(chevBtn);
+            }
 
             sl.ValueChanged += delegate
             {
@@ -942,12 +1253,139 @@ namespace Monolith
             g.Children.Add(b);
         }
 
+        // =========================================================================
+        // SHARED INLINE SUB-VIEW HEADER ("← Geri" + Title + Optional Toggle & Refresh)
+        // =========================================================================
+
+        private DockPanel BuildSubViewHeader(string title, bool hasToggle, bool isToggledOn, Action onToggle, Action onRefresh)
+        {
+            DockPanel hdr = new DockPanel { Margin = new Thickness(0, 0, 0, 10) };
+
+            Border backBtn = new Border
+            {
+                CornerRadius = new CornerRadius(8),
+                Background = ThemeManager.Brush(_palette.ModalSurface),
+                BorderBrush = ThemeManager.Brush(_palette.ModalBorder),
+                BorderThickness = new Thickness(1),
+                Padding = new Thickness(8, 5, 10, 5),
+                Margin = new Thickness(0, 0, 10, 0),
+                Cursor = Cursors.Hand,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            StackPanel backSp = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+            backSp.Children.Add(new TextBlock
+            {
+                Text = "\uE72B",
+                FontFamily = new FontFamily("Segoe MDL2 Assets"),
+                FontSize = 11,
+                Foreground = ThemeManager.Brush(_palette.TextPrimary),
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 5, 0)
+            });
+            backSp.Children.Add(new TextBlock
+            {
+                Text = L10n.T(_cfg, "Geri", "Back"),
+                FontFamily = new FontFamily("Segoe UI"),
+                FontSize = 11.2,
+                FontWeight = FontWeights.SemiBold,
+                Foreground = ThemeManager.Brush(_palette.TextPrimary),
+                VerticalAlignment = VerticalAlignment.Center
+            });
+            backBtn.Child = backSp;
+            backBtn.MouseEnter += delegate { backBtn.BorderBrush = ThemeManager.Brush(_palette.Accent); };
+            backBtn.MouseLeave += delegate { backBtn.BorderBrush = ThemeManager.Brush(_palette.ModalBorder); };
+            backBtn.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e)
+            {
+                e.Handled = true;
+                CloseSubView();
+            };
+            DockPanel.SetDock(backBtn, Dock.Left);
+            hdr.Children.Add(backBtn);
+
+            StackPanel rightControls = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+            if (hasToggle && onToggle != null)
+            {
+                Border togglePill = new Border
+                {
+                    CornerRadius = new CornerRadius(10),
+                    Background = isToggledOn
+                        ? ThemeManager.Brush(_palette.Accent)
+                        : ThemeManager.Brush(_palette.ModalSurface),
+                    BorderBrush = ThemeManager.Brush(isToggledOn ? _palette.Accent : _palette.ModalBorder),
+                    BorderThickness = new Thickness(1),
+                    Padding = new Thickness(9, 3, 9, 3),
+                    Cursor = Cursors.Hand,
+                    VerticalAlignment = VerticalAlignment.Center
+                };
+                togglePill.Child = new TextBlock
+                {
+                    Text = isToggledOn ? L10n.T(_cfg, "Açık", "On") : L10n.T(_cfg, "Kapalı", "Off"),
+                    FontFamily = new FontFamily("Segoe UI"),
+                    FontSize = 10.5,
+                    FontWeight = FontWeights.Bold,
+                    Foreground = isToggledOn ? Brushes.White : ThemeManager.Brush(_palette.TextSecondary)
+                };
+                togglePill.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e)
+                {
+                    e.Handled = true;
+                    onToggle();
+                };
+                rightControls.Children.Add(togglePill);
+            }
+            if (onRefresh != null)
+            {
+                Border refreshBtn = MakeFooterIconBtn("\uE72C", false, L10n.T(_cfg, "Listeyi Yenile", "Refresh List"), onRefresh);
+                rightControls.Children.Add(refreshBtn);
+            }
+            DockPanel.SetDock(rightControls, Dock.Right);
+            hdr.Children.Add(rightControls);
+
+            hdr.Children.Add(new TextBlock
+            {
+                Text = title,
+                FontFamily = new FontFamily("Segoe UI"),
+                FontSize = 14,
+                FontWeight = FontWeights.Bold,
+                Foreground = ThemeManager.Brush(_palette.TextPrimary),
+                VerticalAlignment = VerticalAlignment.Center,
+                TextTrimming = TextTrimming.CharacterEllipsis
+            });
+
+            return hdr;
+        }
+
+        private void AddStatusBannerIfAny(StackPanel root, string msg)
+        {
+            if (string.IsNullOrEmpty(msg)) return;
+            Border banner = new Border
+            {
+                CornerRadius = new CornerRadius(9),
+                Background = ThemeManager.Brush(Color.FromArgb(40, _palette.Accent.R, _palette.Accent.G, _palette.Accent.B)),
+                BorderBrush = ThemeManager.Brush(_palette.Accent),
+                BorderThickness = new Thickness(1),
+                Padding = new Thickness(10, 6, 10, 6),
+                Margin = new Thickness(0, 0, 0, 8)
+            };
+            banner.Child = new TextBlock
+            {
+                Text = msg,
+                FontFamily = new FontFamily("Segoe UI"),
+                FontSize = 11.2,
+                Foreground = ThemeManager.Brush(_palette.TextPrimary),
+                TextWrapping = TextWrapping.Wrap
+            };
+            root.Children.Add(banner);
+        }
+
+        // =========================================================================
+        // SUB-VIEW 1: WI-FI NETWORKS
+        // =========================================================================
+
         private void OpenWifiSubView(bool triggerScan)
         {
             _editMode = false;
-            _wifiViewOpen = true;
+            _activeSubView = "wifi";
             _wifiLoading = true;
-            _wifiStatusMsg = null;
             RebuildUI();
 
             System.Threading.ThreadPool.QueueUserWorkItem(delegate
@@ -964,7 +1402,7 @@ namespace Monolith
                     _wifiLoading = false;
                     if (res != null && !string.IsNullOrEmpty(res.ConnectedSsid))
                         _connectedSsidPreview = res.ConnectedSsid;
-                    if (_wifiViewOpen) RebuildUI();
+                    if (_activeSubView == "wifi") RebuildUI();
                 }));
             });
         }
@@ -979,58 +1417,53 @@ namespace Monolith
 
         private void BuildWifiSubView(StackPanel root, double tileR, bool compact)
         {
-            // Header: Back <- | Wi-Fi | Refresh
-            DockPanel hdr = new DockPanel { Margin = new Thickness(0, 0, 0, 10) };
-
-            Border backBtn = MakeFooterIconBtn("\uE72B", false, L10n.T(_cfg, "Geri", "Back"), delegate
-            {
-                _wifiViewOpen = false;
-                _expandedWifiSsid = null;
-                _wifiStatusMsg = null;
-                RebuildUI();
-            });
-            backBtn.Margin = new Thickness(0, 0, 8, 0);
-            DockPanel.SetDock(backBtn, Dock.Left);
-            hdr.Children.Add(backBtn);
-
-            Border refreshBtn = MakeFooterIconBtn("\uE72C", false, L10n.T(_cfg, "Ağları Yenile", "Refresh Networks"), delegate
-            {
-                OpenWifiSubView(true);
-            });
-            DockPanel.SetDock(refreshBtn, Dock.Right);
-            hdr.Children.Add(refreshBtn);
-
-            hdr.Children.Add(new TextBlock
-            {
-                Text = "Wi-Fi",
-                FontFamily = new FontFamily("Segoe UI"),
-                FontSize = 14.5,
-                FontWeight = FontWeights.Bold,
-                Foreground = ThemeManager.Brush(_palette.TextPrimary),
-                VerticalAlignment = VerticalAlignment.Center
-            });
-            root.Children.Add(hdr);
-
-            if (!string.IsNullOrEmpty(_wifiStatusMsg))
-            {
-                Border banner = new Border
+            root.Children.Add(BuildSubViewHeader(
+                "Wi-Fi",
+                true,
+                _wifiEnabled,
+                delegate
                 {
-                    CornerRadius = new CornerRadius(9),
-                    Background = ThemeManager.Brush(Color.FromArgb(40, _palette.Accent.R, _palette.Accent.G, _palette.Accent.B)),
-                    BorderBrush = ThemeManager.Brush(_palette.Accent),
-                    BorderThickness = new Thickness(1),
-                    Padding = new Thickness(10, 6, 10, 6),
+                    _wifiEnabled = !_wifiEnabled;
+                    _wifiStatusMsg = _wifiEnabled
+                        ? L10n.T(_cfg, "Wi-Fi açılıyor...", "Turning Wi-Fi on...")
+                        : L10n.T(_cfg, "Wi-Fi kapatıldı.", "Wi-Fi turned off.");
+                    RebuildUI();
+                    WifiManager.SetWifiEnabledAsync(_wifiEnabled, delegate
+                    {
+                        Dispatcher.BeginInvoke(new Action(delegate
+                        {
+                            if (_wifiEnabled) OpenWifiSubView(true);
+                            else { _connectedSsidPreview = null; RebuildUI(); }
+                        }));
+                    });
+                },
+                delegate { OpenWifiSubView(true); }));
+
+            AddStatusBannerIfAny(root, _wifiStatusMsg);
+
+            if (!_wifiEnabled)
+            {
+                StackPanel offSp = new StackPanel { Margin = new Thickness(8, 22, 8, 22), HorizontalAlignment = HorizontalAlignment.Center };
+                offSp.Children.Add(new TextBlock
+                {
+                    Text = "\uE701",
+                    FontFamily = new FontFamily("Segoe MDL2 Assets"),
+                    FontSize = 24,
+                    Foreground = ThemeManager.Brush(_palette.TextMuted),
+                    HorizontalAlignment = HorizontalAlignment.Center,
                     Margin = new Thickness(0, 0, 0, 8)
-                };
-                banner.Child = new TextBlock
+                });
+                offSp.Children.Add(new TextBlock
                 {
-                    Text = _wifiStatusMsg,
+                    Text = L10n.T(_cfg, "Wi-Fi kapalı. Ağları taramak için üstten açın.", "Wi-Fi is turned off. Turn it on above to scan networks."),
                     FontFamily = new FontFamily("Segoe UI"),
-                    FontSize = 11.2,
-                    Foreground = ThemeManager.Brush(_palette.TextPrimary),
-                    TextWrapping = TextWrapping.Wrap
-                };
-                root.Children.Add(banner);
+                    FontSize = 11.5,
+                    Foreground = ThemeManager.Brush(_palette.TextSecondary),
+                    TextWrapping = TextWrapping.Wrap,
+                    TextAlignment = TextAlignment.Center
+                });
+                root.Children.Add(offSp);
+                return;
             }
 
             if (_wifiLoading)
@@ -1044,8 +1477,10 @@ namespace Monolith
                     HorizontalAlignment = HorizontalAlignment.Center,
                     Margin = new Thickness(0, 26, 0, 26)
                 });
+                return;
             }
-            else if (_wifiScan == null || !_wifiScan.HasWifiAdapter)
+
+            if (_wifiScan == null || !_wifiScan.HasWifiAdapter)
             {
                 StackPanel emptySp = new StackPanel { Margin = new Thickness(8, 18, 8, 18), HorizontalAlignment = HorizontalAlignment.Center };
                 emptySp.Children.Add(new TextBlock
@@ -1059,7 +1494,7 @@ namespace Monolith
                 });
                 emptySp.Children.Add(new TextBlock
                 {
-                    Text = L10n.T(_cfg, "Wi-Fi bağdaştırıcısı bulunamadı (Kablolu bağlantı aktif olabilir).", "No Wi-Fi adapter detected (Ethernet may be active)."),
+                    Text = L10n.T(_cfg, "Wi-Fi bağdaştırıcısı bulunamadı (Ethernet kablosu aktif olabilir).", "No Wi-Fi adapter detected (Ethernet may be active)."),
                     FontFamily = new FontFamily("Segoe UI"),
                     FontSize = 11.5,
                     Foreground = ThemeManager.Brush(_palette.TextSecondary),
@@ -1083,14 +1518,12 @@ namespace Monolith
                 {
                     listSp.Children.Add(new TextBlock
                     {
-                        Text = _wifiScan.AccessBlockedByLocation
-                            ? L10n.T(_cfg, "Windows 11 konum izni kapalı olduğu için yakındaki ağlar gizlendi. Aşağıdan konum/Wi-Fi ayarlarını açabilirsiniz.", "Windows 11 Location permission is off, hiding nearby Wi-Fi networks.")
-                            : L10n.T(_cfg, "Yakında Wi-Fi ağı bulunamadı.", "No Wi-Fi networks found nearby."),
+                        Text = L10n.T(_cfg, "Yakında listelenen Wi-Fi ağı bulunamadı. Aşağıdan ağ adı (SSID) girerek doğrudan bağlanabilirsiniz.", "No nearby Wi-Fi networks listed. You can connect directly by SSID below."),
                         FontFamily = new FontFamily("Segoe UI"),
-                        FontSize = 11.5,
+                        FontSize = 11.2,
                         Foreground = ThemeManager.Brush(_palette.TextMuted),
                         TextWrapping = TextWrapping.Wrap,
-                        Margin = new Thickness(6, 14, 6, 14)
+                        Margin = new Thickness(6, 10, 6, 10)
                     });
                 }
 
@@ -1169,7 +1602,7 @@ namespace Monolith
                     else if (net.HasProfile)
                         statusText = L10n.T(_cfg, "Kayıtlı", "Saved") + (net.IsSecured ? (" • " + net.AuthLabel) : "");
                     else
-                        statusText = net.IsSecured ? (L10n.T(_cfg, "Güvenli", "Secured") + " • " + net.AuthLabel) : L10n.T(_cfg, "Açık ağ", "Open network");
+                        statusText = net.IsSecured ? (L10n.T(_cfg, "Kilitli", "Secured") + " • " + net.AuthLabel) : L10n.T(_cfg, "Açık ağ", "Open network");
 
                     nameCol.Children.Add(new TextBlock
                     {
@@ -1189,7 +1622,7 @@ namespace Monolith
 
                         if (net.IsConnected)
                         {
-                            Border discBtn = MakeWifiActionButton(L10n.T(_cfg, "Bağlantıyı Kes", "Disconnect"), false, delegate
+                            Border discBtn = MakeSubViewActionButton(L10n.T(_cfg, "Bağlantıyı Kes", "Disconnect"), false, delegate
                             {
                                 _wifiStatusMsg = L10n.T(_cfg, "Bağlantı kesiliyor...", "Disconnecting...");
                                 RebuildUI();
@@ -1206,7 +1639,7 @@ namespace Monolith
                         }
                         else if (net.HasProfile || !net.IsSecured)
                         {
-                            Border connBtn = MakeWifiActionButton(L10n.T(_cfg, "Bağlan", "Connect"), true, delegate
+                            Border connBtn = MakeSubViewActionButton(L10n.T(_cfg, "Bağlan", "Connect"), true, delegate
                             {
                                 _wifiStatusMsg = L10n.T(_cfg, "Bağlanılıyor: ", "Connecting: ") + capNet.Ssid + "...";
                                 RebuildUI();
@@ -1286,7 +1719,7 @@ namespace Monolith
                                 if (ke.Key == Key.Enter) { ke.Handled = true; submitPwd(); }
                             };
                             actionArea.Children.Add(pwdBox);
-                            actionArea.Children.Add(MakeWifiActionButton(L10n.T(_cfg, "Bağlan", "Connect"), true, submitPwd));
+                            actionArea.Children.Add(MakeSubViewActionButton(L10n.T(_cfg, "Bağlan", "Connect"), true, submitPwd));
                         }
 
                         cardBody.Children.Add(actionArea);
@@ -1309,50 +1742,574 @@ namespace Monolith
 
                 sv.Content = listSp;
                 root.Children.Add(sv);
-
-                if (_wifiScan.AccessBlockedByLocation)
-                {
-                    Border locLink = MakeWifiActionButton(L10n.T(_cfg, "Tüm ağlar için Windows Konum İznini Aç", "Enable Location for Nearby Wi-Fi Scan"), false, delegate
-                    {
-                        OpenUri("ms-settings:privacy-location");
-                    });
-                    locLink.Margin = new Thickness(0, 0, 0, 6);
-                    root.Children.Add(locLink);
-                }
             }
 
-            // Bottom footer: More Wi-Fi Settings link + Win+A
-            Border wfFoot = new Border
+            // Inline Manual SSID & Password Entry (zero external Windows Settings needed!)
+            if (_showManualWifiInput)
             {
-                BorderBrush = ThemeManager.Brush(_palette.DividerColor),
-                BorderThickness = new Thickness(0, 1, 0, 0),
-                Padding = new Thickness(2, 8, 2, 0)
-            };
-            DockPanel wfDp = new DockPanel();
-            Border winABtn = MakeFooterIconBtn("\uE71D", false, L10n.T(_cfg, "Windows Hızlı Ayarlar (Win+A)", "Windows Quick Settings (Win+A)"), delegate
+                Border manualBox = new Border
+                {
+                    CornerRadius = new CornerRadius(tileR),
+                    Background = ThemeManager.Brush(_palette.ModalSurface),
+                    BorderBrush = ThemeManager.Brush(_palette.Accent),
+                    BorderThickness = new Thickness(1),
+                    Padding = new Thickness(10, 8, 10, 8),
+                    Margin = new Thickness(0, 2, 0, 4)
+                };
+                StackPanel msp = new StackPanel();
+                msp.Children.Add(new TextBlock
+                {
+                    Text = L10n.T(_cfg, "Ağ Adı (SSID) ve Şifre ile Doğrudan Bağlan:", "Connect Directly by Network Name (SSID) & Password:"),
+                    FontFamily = new FontFamily("Segoe UI"),
+                    FontSize = 10.5,
+                    FontWeight = FontWeights.SemiBold,
+                    Foreground = ThemeManager.Brush(_palette.TextPrimary),
+                    Margin = new Thickness(0, 0, 0, 5)
+                });
+                TextBox ssidInput = new TextBox
+                {
+                    FontFamily = new FontFamily("Segoe UI"),
+                    FontSize = 11.5,
+                    Padding = new Thickness(7, 4, 7, 4),
+                    Background = ThemeManager.Brush(_palette.ModalBg),
+                    Foreground = ThemeManager.Brush(_palette.TextPrimary),
+                    BorderBrush = ThemeManager.Brush(_palette.ModalBorder),
+                    BorderThickness = new Thickness(1),
+                    Margin = new Thickness(0, 0, 0, 5)
+                };
+                PasswordBox pwdInput = new PasswordBox
+                {
+                    FontFamily = new FontFamily("Segoe UI"),
+                    FontSize = 11.5,
+                    Padding = new Thickness(7, 4, 7, 4),
+                    Background = ThemeManager.Brush(_palette.ModalBg),
+                    Foreground = ThemeManager.Brush(_palette.TextPrimary),
+                    BorderBrush = ThemeManager.Brush(_palette.ModalBorder),
+                    BorderThickness = new Thickness(1),
+                    Margin = new Thickness(0, 0, 0, 6)
+                };
+                msp.Children.Add(ssidInput);
+                msp.Children.Add(pwdInput);
+                msp.Children.Add(MakeSubViewActionButton(L10n.T(_cfg, "Bağlan", "Connect"), true, delegate
+                {
+                    string targetSsid = (ssidInput.Text ?? "").Trim();
+                    string targetPwd = pwdInput.Password ?? "";
+                    if (string.IsNullOrEmpty(targetSsid)) return;
+                    _showManualWifiInput = false;
+                    _wifiStatusMsg = L10n.T(_cfg, "Bağlanılıyor: ", "Connecting: ") + targetSsid + "...";
+                    RebuildUI();
+                    WifiManager.ConnectWithPasswordAsync(targetSsid, targetPwd, string.IsNullOrEmpty(targetPwd), delegate(bool ok, string msg)
+                    {
+                        Dispatcher.BeginInvoke(new Action(delegate
+                        {
+                            _wifiStatusMsg = ok
+                                ? (L10n.T(_cfg, "Bağlandı: ", "Connected: ") + targetSsid)
+                                : L10n.T(_cfg, "Bağlanamadı (Ağ adını ve şifreyi kontrol edin).", "Could not connect (check SSID and password).");
+                            if (ok) _connectedSsidPreview = targetSsid;
+                            OpenWifiSubView(false);
+                        }));
+                    });
+                }));
+                manualBox.Child = msp;
+                root.Children.Add(manualBox);
+            }
+            else
             {
-                Close();
-                NativeWin32.OpenWindowsQuickSettings();
-            });
-            DockPanel.SetDock(winABtn, Dock.Right);
-            wfDp.Children.Add(winABtn);
-
-            TextBlock moreLink = new TextBlock
-            {
-                Text = L10n.T(_cfg, "Diğer Wi-Fi ayarları", "More Wi-Fi settings"),
-                FontFamily = new FontFamily("Segoe UI"),
-                FontSize = 11.2,
-                Foreground = ThemeManager.Brush(_palette.Accent),
-                Cursor = Cursors.Hand,
-                VerticalAlignment = VerticalAlignment.Center
-            };
-            moreLink.MouseLeftButtonUp += delegate { OpenUri("ms-settings:network-wifi"); };
-            wfDp.Children.Add(moreLink);
-            wfFoot.Child = wfDp;
-            root.Children.Add(wfFoot);
+                Border addManualBtn = MakeSubViewActionButton(L10n.T(_cfg, "+ Gizli / Başka Ağa Bağlan", "+ Connect to Hidden Network"), false, delegate
+                {
+                    _showManualWifiInput = true;
+                    RebuildUI();
+                });
+                addManualBtn.HorizontalAlignment = HorizontalAlignment.Left;
+                root.Children.Add(addManualBtn);
+            }
         }
 
-        private Border MakeWifiActionButton(string label, bool primary, Action onClick)
+        // =========================================================================
+        // SUB-VIEW 2: BLUETOOTH PAIRED DEVICES
+        // =========================================================================
+
+        private void OpenBluetoothSubView()
+        {
+            _editMode = false;
+            _activeSubView = "bluetooth";
+            _btLoading = true;
+            RebuildUI();
+
+            System.Threading.ThreadPool.QueueUserWorkItem(delegate
+            {
+                BluetoothScanResult res = BluetoothManager.GetPairedDevices();
+                Dispatcher.BeginInvoke(new Action(delegate
+                {
+                    _btScan = res;
+                    _btLoading = false;
+                    if (_activeSubView == "bluetooth") RebuildUI();
+                }));
+            });
+        }
+
+        private void BuildBluetoothSubView(StackPanel root, double tileR, bool compact)
+        {
+            root.Children.Add(BuildSubViewHeader(
+                "Bluetooth",
+                true,
+                _btEnabled,
+                delegate
+                {
+                    _btEnabled = !_btEnabled;
+                    _btStatusMsg = _btEnabled
+                        ? L10n.T(_cfg, "Bluetooth açıldı.", "Bluetooth turned on.")
+                        : L10n.T(_cfg, "Bluetooth kapatıldı.", "Bluetooth turned off.");
+                    RebuildUI();
+                    BluetoothManager.SetBluetoothEnabledAsync(_btEnabled, delegate
+                    {
+                        Dispatcher.BeginInvoke(new Action(delegate
+                        {
+                            OpenBluetoothSubView();
+                        }));
+                    });
+                },
+                delegate { OpenBluetoothSubView(); }));
+
+            AddStatusBannerIfAny(root, _btStatusMsg);
+
+            if (!_btEnabled)
+            {
+                StackPanel offSp = new StackPanel { Margin = new Thickness(8, 22, 8, 22), HorizontalAlignment = HorizontalAlignment.Center };
+                offSp.Children.Add(new TextBlock
+                {
+                    Text = "\uE702",
+                    FontFamily = new FontFamily("Segoe MDL2 Assets"),
+                    FontSize = 24,
+                    Foreground = ThemeManager.Brush(_palette.TextMuted),
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    Margin = new Thickness(0, 0, 0, 8)
+                });
+                offSp.Children.Add(new TextBlock
+                {
+                    Text = L10n.T(_cfg, "Bluetooth kapalı. Eşleştirilmiş cihazlara bağlanmak için üstten açın.", "Bluetooth is turned off. Turn it on above to connect paired devices."),
+                    FontFamily = new FontFamily("Segoe UI"),
+                    FontSize = 11.5,
+                    Foreground = ThemeManager.Brush(_palette.TextSecondary),
+                    TextWrapping = TextWrapping.Wrap,
+                    TextAlignment = TextAlignment.Center
+                });
+                root.Children.Add(offSp);
+                return;
+            }
+
+            if (_btLoading)
+            {
+                root.Children.Add(new TextBlock
+                {
+                    Text = L10n.T(_cfg, "Eşleştirilmiş Bluetooth cihazları yükleniyor...", "Loading paired Bluetooth devices..."),
+                    FontFamily = new FontFamily("Segoe UI"),
+                    FontSize = 12,
+                    Foreground = ThemeManager.Brush(_palette.TextMuted),
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    Margin = new Thickness(0, 26, 0, 26)
+                });
+                return;
+            }
+
+            if (_btScan == null || _btScan.Devices.Count == 0)
+            {
+                StackPanel emptySp = new StackPanel { Margin = new Thickness(8, 20, 8, 20), HorizontalAlignment = HorizontalAlignment.Center };
+                emptySp.Children.Add(new TextBlock
+                {
+                    Text = "\uE702",
+                    FontFamily = new FontFamily("Segoe MDL2 Assets"),
+                    FontSize = 24,
+                    Foreground = ThemeManager.Brush(_palette.TextMuted),
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    Margin = new Thickness(0, 0, 0, 8)
+                });
+                emptySp.Children.Add(new TextBlock
+                {
+                    Text = L10n.T(_cfg, "Eşleştirilmiş Bluetooth cihazı bulunamadı.", "No paired Bluetooth devices found."),
+                    FontFamily = new FontFamily("Segoe UI"),
+                    FontSize = 11.5,
+                    Foreground = ThemeManager.Brush(_palette.TextSecondary),
+                    TextWrapping = TextWrapping.Wrap,
+                    TextAlignment = TextAlignment.Center
+                });
+                root.Children.Add(emptySp);
+                return;
+            }
+
+            ScrollViewer sv = new ScrollViewer
+            {
+                MaxHeight = 300,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled
+            };
+            StackPanel listSp = new StackPanel();
+
+            for (int i = 0; i < _btScan.Devices.Count; i++)
+            {
+                BluetoothDeviceItem dev = _btScan.Devices[i];
+                Border rowCard = new Border
+                {
+                    CornerRadius = new CornerRadius(tileR),
+                    Background = dev.IsConnected
+                        ? ThemeManager.Brush(Color.FromArgb(46, _palette.Accent.R, _palette.Accent.G, _palette.Accent.B))
+                        : ThemeManager.Brush(_palette.ModalSurface),
+                    BorderBrush = dev.IsConnected
+                        ? ThemeManager.Brush(_palette.Accent)
+                        : ThemeManager.Brush(_palette.ModalBorder),
+                    BorderThickness = new Thickness(1),
+                    Padding = new Thickness(10, 8, 10, 8),
+                    Margin = new Thickness(0, 0, 0, 6),
+                    Cursor = Cursors.Hand
+                };
+
+                DockPanel line = new DockPanel { VerticalAlignment = VerticalAlignment.Center };
+
+                Border iconBadge = new Border
+                {
+                    Width = 30,
+                    Height = 30,
+                    CornerRadius = new CornerRadius(15),
+                    Background = dev.IsConnected
+                        ? ThemeManager.Brush(_palette.Accent)
+                        : ThemeManager.Brush(Color.FromArgb(38, 148, 163, 184)),
+                    Margin = new Thickness(0, 0, 10, 0),
+                    VerticalAlignment = VerticalAlignment.Center
+                };
+                iconBadge.Child = new TextBlock
+                {
+                    Text = dev.IconGlyph,
+                    FontFamily = new FontFamily("Segoe MDL2 Assets"),
+                    FontSize = 13.5,
+                    Foreground = dev.IsConnected ? Brushes.White : ThemeManager.Brush(_palette.TextPrimary),
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    VerticalAlignment = VerticalAlignment.Center
+                };
+                DockPanel.SetDock(iconBadge, Dock.Left);
+                line.Children.Add(iconBadge);
+
+                BluetoothDeviceItem capDev = dev;
+                Action toggleAction = delegate
+                {
+                    _btStatusMsg = capDev.IsConnected
+                        ? (L10n.T(_cfg, "Bağlantı kesiliyor: ", "Disconnecting: ") + capDev.Name + "...")
+                        : (L10n.T(_cfg, "Bağlanılıyor: ", "Connecting: ") + capDev.Name + "...");
+                    RebuildUI();
+                    BluetoothManager.ToggleDeviceConnectionAsync(capDev, delegate(bool ok, bool nowConn)
+                    {
+                        Dispatcher.BeginInvoke(new Action(delegate
+                        {
+                            _btStatusMsg = nowConn
+                                ? (L10n.T(_cfg, "Bağlandı: ", "Connected: ") + capDev.Name)
+                                : (L10n.T(_cfg, "Bağlantı kesildi: ", "Disconnected: ") + capDev.Name);
+                            _activeAudioShortName = AudioDeviceManager.GetDefaultOutputShortName();
+                            OpenBluetoothSubView();
+                        }));
+                    });
+                };
+
+                Border actionBtn = MakeSubViewActionButton(
+                    dev.IsConnected ? L10n.T(_cfg, "Kes", "Disconnect") : L10n.T(_cfg, "Bağlan", "Connect"),
+                    !dev.IsConnected,
+                    toggleAction);
+                actionBtn.VerticalAlignment = VerticalAlignment.Center;
+                DockPanel.SetDock(actionBtn, Dock.Right);
+                line.Children.Add(actionBtn);
+
+                StackPanel infoCol = new StackPanel { VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 8, 0) };
+                infoCol.Children.Add(new TextBlock
+                {
+                    Text = dev.Name,
+                    FontFamily = new FontFamily("Segoe UI"),
+                    FontSize = 12,
+                    FontWeight = dev.IsConnected ? FontWeights.Bold : FontWeights.SemiBold,
+                    Foreground = ThemeManager.Brush(_palette.TextPrimary),
+                    TextTrimming = TextTrimming.CharacterEllipsis
+                });
+                infoCol.Children.Add(new TextBlock
+                {
+                    Text = (dev.IsConnected ? L10n.T(_cfg, "Bağlı", "Connected") : L10n.T(_cfg, "Eşleştirildi", "Paired"))
+                           + " • " + L10n.T(_cfg, dev.CategoryTr, dev.CategoryEn),
+                    FontFamily = new FontFamily("Segoe UI"),
+                    FontSize = 10.2,
+                    Foreground = dev.IsConnected ? ThemeManager.Brush(_palette.Accent) : ThemeManager.Brush(_palette.TextMuted),
+                    TextTrimming = TextTrimming.CharacterEllipsis
+                });
+                line.Children.Add(infoCol);
+
+                rowCard.Child = line;
+                rowCard.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e)
+                {
+                    e.Handled = true;
+                    toggleAction();
+                };
+                listSp.Children.Add(rowCard);
+            }
+
+            sv.Content = listSp;
+            root.Children.Add(sv);
+        }
+
+        // =========================================================================
+        // SUB-VIEW 3: SOUND OUTPUT DEVICES (Hoparlör, Kulaklık, Monitör)
+        // =========================================================================
+
+        private void OpenAudioOutputSubView()
+        {
+            _editMode = false;
+            _activeSubView = "sound_output";
+            _audioDevices = AudioDeviceManager.GetActiveOutputDevices();
+            for (int i = 0; i < _audioDevices.Count; i++)
+            {
+                if (_audioDevices[i].IsDefault)
+                {
+                    _activeAudioShortName = _audioDevices[i].ShortName;
+                    break;
+                }
+            }
+            RebuildUI();
+        }
+
+        private void BuildAudioOutputSubView(StackPanel root, double tileR, bool compact)
+        {
+            root.Children.Add(BuildSubViewHeader(
+                L10n.T(_cfg, "Ses Çıkışı", "Sound Output"),
+                false,
+                true,
+                null,
+                delegate { OpenAudioOutputSubView(); }));
+
+            AddStatusBannerIfAny(root, _audioStatusMsg);
+
+            if (_audioDevices == null || _audioDevices.Count == 0)
+            {
+                root.Children.Add(new TextBlock
+                {
+                    Text = L10n.T(_cfg, "Aktif ses çıkış cihazı bulunamadı.", "No active sound output devices found."),
+                    FontFamily = new FontFamily("Segoe UI"),
+                    FontSize = 11.5,
+                    Foreground = ThemeManager.Brush(_palette.TextMuted),
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    Margin = new Thickness(0, 22, 0, 22)
+                });
+                return;
+            }
+
+            ScrollViewer sv = new ScrollViewer
+            {
+                MaxHeight = 300,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled
+            };
+            StackPanel listSp = new StackPanel();
+
+            for (int i = 0; i < _audioDevices.Count; i++)
+            {
+                AudioOutputDeviceInfo dev = _audioDevices[i];
+                Border rowCard = new Border
+                {
+                    CornerRadius = new CornerRadius(tileR),
+                    Background = dev.IsDefault
+                        ? ThemeManager.Brush(Color.FromArgb(46, _palette.Accent.R, _palette.Accent.G, _palette.Accent.B))
+                        : ThemeManager.Brush(_palette.ModalSurface),
+                    BorderBrush = dev.IsDefault
+                        ? ThemeManager.Brush(_palette.Accent)
+                        : ThemeManager.Brush(_palette.ModalBorder),
+                    BorderThickness = new Thickness(1),
+                    Padding = new Thickness(10, 9, 10, 9),
+                    Margin = new Thickness(0, 0, 0, 6),
+                    Cursor = Cursors.Hand
+                };
+
+                DockPanel line = new DockPanel { VerticalAlignment = VerticalAlignment.Center };
+
+                Border iconBadge = new Border
+                {
+                    Width = 30,
+                    Height = 30,
+                    CornerRadius = new CornerRadius(15),
+                    Background = dev.IsDefault
+                        ? ThemeManager.Brush(_palette.Accent)
+                        : ThemeManager.Brush(Color.FromArgb(38, 148, 163, 184)),
+                    Margin = new Thickness(0, 0, 10, 0),
+                    VerticalAlignment = VerticalAlignment.Center
+                };
+                iconBadge.Child = new TextBlock
+                {
+                    Text = dev.IconGlyph,
+                    FontFamily = new FontFamily("Segoe MDL2 Assets"),
+                    FontSize = 13.5,
+                    Foreground = dev.IsDefault ? Brushes.White : ThemeManager.Brush(_palette.TextPrimary),
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    VerticalAlignment = VerticalAlignment.Center
+                };
+                DockPanel.SetDock(iconBadge, Dock.Left);
+                line.Children.Add(iconBadge);
+
+                if (dev.IsDefault)
+                {
+                    TextBlock chk = new TextBlock
+                    {
+                        Text = "\uE73E",
+                        FontFamily = new FontFamily("Segoe MDL2 Assets"),
+                        FontSize = 14,
+                        Foreground = ThemeManager.Brush(_palette.Accent),
+                        VerticalAlignment = VerticalAlignment.Center,
+                        Margin = new Thickness(6, 0, 2, 0)
+                    };
+                    DockPanel.SetDock(chk, Dock.Right);
+                    line.Children.Add(chk);
+                }
+
+                StackPanel nameCol = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+                nameCol.Children.Add(new TextBlock
+                {
+                    Text = dev.Name,
+                    FontFamily = new FontFamily("Segoe UI"),
+                    FontSize = 11.8,
+                    FontWeight = dev.IsDefault ? FontWeights.Bold : FontWeights.SemiBold,
+                    Foreground = ThemeManager.Brush(_palette.TextPrimary),
+                    TextTrimming = TextTrimming.CharacterEllipsis
+                });
+                nameCol.Children.Add(new TextBlock
+                {
+                    Text = dev.IsDefault
+                        ? L10n.T(_cfg, "Varsayılan Ses Çıkışı", "Default Sound Output")
+                        : L10n.T(_cfg, "Varsayılan yapmak için tıklayın", "Click to set as default"),
+                    FontFamily = new FontFamily("Segoe UI"),
+                    FontSize = 10.2,
+                    Foreground = dev.IsDefault ? ThemeManager.Brush(_palette.Accent) : ThemeManager.Brush(_palette.TextMuted)
+                });
+                line.Children.Add(nameCol);
+
+                rowCard.Child = line;
+                AudioOutputDeviceInfo capDev = dev;
+                rowCard.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e)
+                {
+                    e.Handled = true;
+                    if (AudioDeviceManager.SetDefaultOutputDevice(capDev.Id))
+                    {
+                        _activeAudioShortName = capDev.ShortName;
+                        _audioStatusMsg = L10n.T(_cfg, "Varsayılan ses cihazı: ", "Default audio output: ") + capDev.ShortName;
+                        OpenAudioOutputSubView();
+                    }
+                };
+                listSp.Children.Add(rowCard);
+            }
+
+            sv.Content = listSp;
+            root.Children.Add(sv);
+        }
+
+        // =========================================================================
+        // SUB-VIEW 4: DISPLAY PROJECTION (Yansıt: PC, Yinele, Uzat, İkinci Ekran)
+        // =========================================================================
+
+        private void BuildDisplayProjectSubView(StackPanel root, double tileR, bool compact)
+        {
+            root.Children.Add(BuildSubViewHeader(
+                L10n.T(_cfg, "Yansıt", "Project"),
+                false,
+                true,
+                null,
+                null));
+
+            AddStatusBannerIfAny(root, _displayStatusMsg);
+
+            string curMode = DisplayProjectManager.GetCurrentMode();
+
+            for (int i = 0; i < DisplayProjectManager.Modes.Count; i++)
+            {
+                ProjectionModeOption opt = DisplayProjectManager.Modes[i];
+                bool isCurrent = string.Equals(opt.ModeId, curMode, StringComparison.OrdinalIgnoreCase);
+
+                Border rowCard = new Border
+                {
+                    CornerRadius = new CornerRadius(tileR),
+                    Background = isCurrent
+                        ? ThemeManager.Brush(Color.FromArgb(46, _palette.Accent.R, _palette.Accent.G, _palette.Accent.B))
+                        : ThemeManager.Brush(_palette.ModalSurface),
+                    BorderBrush = isCurrent
+                        ? ThemeManager.Brush(_palette.Accent)
+                        : ThemeManager.Brush(_palette.ModalBorder),
+                    BorderThickness = new Thickness(1),
+                    Padding = new Thickness(11, 9, 11, 9),
+                    Margin = new Thickness(0, 0, 0, 6),
+                    Cursor = Cursors.Hand
+                };
+
+                DockPanel line = new DockPanel { VerticalAlignment = VerticalAlignment.Center };
+
+                Border iconBadge = new Border
+                {
+                    Width = 32,
+                    Height = 32,
+                    CornerRadius = new CornerRadius(16),
+                    Background = isCurrent
+                        ? ThemeManager.Brush(_palette.Accent)
+                        : ThemeManager.Brush(Color.FromArgb(38, 148, 163, 184)),
+                    Margin = new Thickness(0, 0, 10, 0),
+                    VerticalAlignment = VerticalAlignment.Center
+                };
+                iconBadge.Child = new TextBlock
+                {
+                    Text = opt.IconGlyph,
+                    FontFamily = new FontFamily("Segoe MDL2 Assets"),
+                    FontSize = 14,
+                    Foreground = isCurrent ? Brushes.White : ThemeManager.Brush(_palette.TextPrimary),
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    VerticalAlignment = VerticalAlignment.Center
+                };
+                DockPanel.SetDock(iconBadge, Dock.Left);
+                line.Children.Add(iconBadge);
+
+                if (isCurrent)
+                {
+                    TextBlock chk = new TextBlock
+                    {
+                        Text = "\uE73E",
+                        FontFamily = new FontFamily("Segoe MDL2 Assets"),
+                        FontSize = 14,
+                        Foreground = ThemeManager.Brush(_palette.Accent),
+                        VerticalAlignment = VerticalAlignment.Center,
+                        Margin = new Thickness(6, 0, 2, 0)
+                    };
+                    DockPanel.SetDock(chk, Dock.Right);
+                    line.Children.Add(chk);
+                }
+
+                StackPanel txtCol = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+                txtCol.Children.Add(new TextBlock
+                {
+                    Text = L10n.T(_cfg, opt.TitleTr, opt.TitleEn),
+                    FontFamily = new FontFamily("Segoe UI"),
+                    FontSize = 12,
+                    FontWeight = isCurrent ? FontWeights.Bold : FontWeights.SemiBold,
+                    Foreground = ThemeManager.Brush(_palette.TextPrimary)
+                });
+                txtCol.Children.Add(new TextBlock
+                {
+                    Text = L10n.T(_cfg, opt.SubTr, opt.SubEn),
+                    FontFamily = new FontFamily("Segoe UI"),
+                    FontSize = 10.2,
+                    Foreground = isCurrent ? ThemeManager.Brush(_palette.Accent) : ThemeManager.Brush(_palette.TextMuted)
+                });
+                line.Children.Add(txtCol);
+
+                rowCard.Child = line;
+                ProjectionModeOption capOpt = opt;
+                rowCard.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e)
+                {
+                    e.Handled = true;
+                    DisplayProjectManager.ApplyProjectionMode(capOpt.ModeId);
+                    _displayStatusMsg = L10n.T(_cfg, "Uygulandı: ", "Applied: ") + L10n.T(_cfg, capOpt.TitleTr, capOpt.TitleEn);
+                    RebuildUI();
+                };
+                root.Children.Add(rowCard);
+            }
+        }
+
+        private Border MakeSubViewActionButton(string label, bool primary, Action onClick)
         {
             Border b = new Border
             {
@@ -1380,26 +2337,95 @@ namespace Monolith
             return b;
         }
 
-        private void ExecuteTileAction(string id)
+        // =========================================================================
+        // LEFT-CLICK TILE TOGGLE ACTIONS (Zero external Windows Settings windows!)
+        // =========================================================================
+
+        private void ExecuteTileLeftToggle(string id)
         {
-            if (id == "wifi") OpenWifiSubView(true);
-            else if (id == "bluetooth") OpenUri("ms-settings:bluetooth");
-            else if (id == "nightlight") OpenUri("ms-settings:nightlight");
-            else if (id == "focus") OpenUri("ms-settings:quiethours");
-            else if (id == "airplane") OpenUri("ms-settings:network-airplanemode");
-            else if (id == "sound_output") OpenUri("ms-settings:sound");
-            else if (id == "battery_saver") OpenUri("ms-settings:powersleep");
-            else if (id == "settings") OpenUri("ms-settings:");
-            else if (id == "snip") OpenUri("ms-screenclip:");
-            else if (id == "taskmgr")
+            if (id == "wifi")
             {
-                try { Process.Start(new ProcessStartInfo("taskmgr.exe") { UseShellExecute = true }); } catch { }
-                Close();
+                _wifiEnabled = !_wifiEnabled;
+                if (!_wifiEnabled) _connectedSsidPreview = null;
+                RebuildUI();
+                WifiManager.SetWifiEnabledAsync(_wifiEnabled, delegate
+                {
+                    if (_wifiEnabled)
+                    {
+                        string ssid = WifiManager.GetQuickConnectedSsid();
+                        Dispatcher.BeginInvoke(new Action(delegate
+                        {
+                            _connectedSsidPreview = ssid;
+                            if (string.IsNullOrEmpty(_activeSubView)) RebuildUI();
+                        }));
+                    }
+                });
+            }
+            else if (id == "bluetooth")
+            {
+                _btEnabled = !_btEnabled;
+                RebuildUI();
+                BluetoothManager.SetBluetoothEnabledAsync(_btEnabled, null);
             }
             else if (id == "display")
             {
+                DisplayProjectManager.ToggleProjection();
+                RebuildUI();
+            }
+            else if (id == "sound_output")
+            {
+                NativeWin32.SendKeyPress(NativeWin32.VK_VOLUME_MUTE);
+                _tel.VolumeMuted = !_tel.VolumeMuted;
+                RebuildUI();
+                if (_onChanged != null) _onChanged();
+            }
+            else if (id == "nightlight")
+            {
+                QuickToggleManager.ToggleNightLight();
+                RebuildUI();
+            }
+            else if (id == "focus")
+            {
+                QuickToggleManager.ToggleFocusMode();
+                RebuildUI();
+            }
+            else if (id == "airplane")
+            {
+                QuickToggleManager.ToggleAirplaneModeAsync(delegate
+                {
+                    Dispatcher.BeginInvoke(new Action(delegate
+                    {
+                        _wifiEnabled = !QuickToggleManager.IsAirplaneModeEnabled;
+                        _btEnabled = !QuickToggleManager.IsAirplaneModeEnabled;
+                        RebuildUI();
+                    }));
+                });
+                RebuildUI();
+            }
+            else if (id == "battery_saver")
+            {
+                QuickToggleManager.ToggleBatterySaver(_cfg);
+                RebuildUI();
+                if (_onChanged != null) _onChanged();
+            }
+            else if (id == "settings")
+            {
                 Close();
-                NativeWin32.OpenProjectDisplay();
+                if (_onOpenSettings != null) _onOpenSettings();
+            }
+            else if (id == "snip")
+            {
+                Close();
+                try
+                {
+                    Process.Start(new ProcessStartInfo("snippingtool.exe", "/clip") { UseShellExecute = true });
+                }
+                catch { }
+            }
+            else if (id == "taskmgr")
+            {
+                Close();
+                try { Process.Start(new ProcessStartInfo("taskmgr.exe") { UseShellExecute = true }); } catch { }
             }
             else if (id == "taskview")
             {
@@ -1415,12 +2441,6 @@ namespace Monolith
                 if (AllTiles[i].Id == id) return AllTiles[i];
             }
             return null;
-        }
-
-        private void OpenUri(string uri)
-        {
-            try { Process.Start(new ProcessStartInfo(uri) { UseShellExecute = true }); } catch { }
-            Close();
         }
     }
 }
