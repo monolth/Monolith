@@ -74,6 +74,7 @@ namespace Monolith
         public const byte VK_LEFT = 0x25;
         public const byte VK_RIGHT = 0x27;
         public const byte VK_SPACE = 0x20;
+        public const byte VK_RETURN = 0x0D;
         public const byte VK_ESCAPE = 0x1B;
         public const int SW_MAXIMIZE = 3;
 
@@ -666,16 +667,27 @@ namespace Monolith
             catch { }
         }
 
+        private static bool IsOverflowWindowActuallyOpen(IntPtr h)
+        {
+            if (h == IntPtr.Zero || !IsWindowVisible(h)) return false;
+            if (IsWindowCloaked(h)) return false;
+            RECT rc;
+            if (!GetWindowRect(h, out rc)) return false;
+            int w = rc.Right - rc.Left;
+            int hgt = rc.Bottom - rc.Top;
+            return w >= 32 && hgt >= 32;
+        }
+
         public static IntPtr FindHiddenIconsOverflowWindow()
         {
-            // Windows 11 XAML Island overflow window
+            // Windows 11 XAML Island overflow window (must be visible, uncloaked, and actually sized)
             IntPtr h11 = FindWindow("TopLevelWindowForOverflowXamlIsland", null);
-            if (h11 != IntPtr.Zero && IsWindowVisible(h11))
+            if (IsOverflowWindowActuallyOpen(h11))
                 return h11;
 
             // Windows 10 / legacy overflow window
             IntPtr h10 = FindWindow("NotifyIconOverflowWindow", null);
-            if (h10 != IntPtr.Zero && IsWindowVisible(h10))
+            if (IsOverflowWindowActuallyOpen(h10))
                 return h10;
 
             return IntPtr.Zero;
@@ -764,9 +776,22 @@ namespace Monolith
             }
         }
 
+        private static void GhostSleep(IntPtr tray, int totalMs)
+        {
+            int elapsed = 0;
+            while (elapsed < totalMs)
+            {
+                if (tray != IntPtr.Zero) GhostTaskbar(tray);
+                int step = Math.Min(15, totalMs - elapsed);
+                Thread.Sleep(step);
+                elapsed += step;
+            }
+            if (tray != IntPtr.Zero) GhostTaskbar(tray);
+        }
+
         /// <summary>
         /// Opens or dismisses the native Windows 11/10 "Show Hidden Icons" system tray overflow flyout,
-        /// keeps Shell_TrayWnd 100% invisible (layered alpha = 0 + click-through),
+        /// keeps Shell_TrayWnd 100% invisible (layered alpha = 0 + click-through) even when ABS_AUTOHIDE is active,
         /// and anchors the Hidden Icons flyout directly above (or below) Monolith's own '^' button!
         /// </summary>
         public static void TriggerHiddenIconsFlyoutAsync(int anchorCenterX, int dockTopPx, int dockBottomPx, bool isTop, Action<bool> onCompleted)
@@ -776,23 +801,16 @@ namespace Monolith
                 bool opened = false;
                 try
                 {
-                    // 1. If already open, dismiss cleanly and re-hide Shell_TrayWnd
+                    // 1. If already genuinely open (visible + uncloaked + sized), dismiss cleanly
                     IntPtr existing = FindHiddenIconsOverflowWindow();
                     if (existing != IntPtr.Zero)
                     {
                         SendKeyPress(VK_ESCAPE);
-                        ShowWindowAsync(existing, SW_HIDE);
                         if (onCompleted != null) onCompleted(false);
                         return;
                     }
 
-                    // 2. Pre-position existing hidden overflow window if it's already in memory to prevent corner flash
-                    IntPtr pre11 = FindWindow("TopLevelWindowForOverflowXamlIsland", null);
-                    if (pre11 != IntPtr.Zero) MoveOverflowToAnchor(pre11, anchorCenterX, dockTopPx, dockBottomPx, isTop);
-                    IntPtr pre10 = FindWindow("NotifyIconOverflowWindow", null);
-                    if (pre10 != IntPtr.Zero) MoveOverflowToAnchor(pre10, anchorCenterX, dockTopPx, dockBottomPx, isTop);
-
-                    // 3. Make Shell_TrayWnd 100% transparent & click-through BEFORE touching visibility!
+                    // 2. Make Shell_TrayWnd 100% transparent & click-through BEFORE waking it up!
                     IntPtr tray = FindWindow("Shell_TrayWnd", null);
                     if (tray != IntPtr.Zero)
                     {
@@ -800,12 +818,16 @@ namespace Monolith
                         if (!IsWindowVisible(tray))
                         {
                             ShowWindow(tray, SW_SHOWNA);
-                            GhostTaskbar(tray);
-                            Thread.Sleep(60);
+                            GhostSleep(tray, 45);
                         }
                     }
 
-                    // 4. Stage A: Try invoking the real chevron button via UIAutomation (zero taskbar flash)
+                    // 3. Wake up auto-hidden Windows 11 taskbar via Win+B (stays 100% alpha=0 invisible!)
+                    //    This brings Shell_TrayWnd on-screen so XAML chevron invoke & Space/Enter both work!
+                    SendWinCombo(VK_B);
+                    GhostSleep(tray, 220);
+
+                    // 4. Stage A: Invoke the real chevron button via UIAutomation on the now-awake taskbar
                     bool uiaInvoked = false;
                     if (tray != IntPtr.Zero)
                     {
@@ -838,22 +860,27 @@ namespace Monolith
 
                     if (uiaInvoked)
                     {
-                        opened = WaitAndAnchorOverflow(tray, anchorCenterX, dockTopPx, dockBottomPx, isTop, 260);
+                        opened = WaitAndAnchorOverflow(tray, anchorCenterX, dockTopPx, dockBottomPx, isTop, 420);
                     }
 
-                    // 5. Stage B: If Win11/Win10 overflow HWND already exists in memory, show & anchor it directly
+                    // 5. Stage B: Press Space (Win+B already placed keyboard focus right on the '^' chevron)
                     if (!opened)
                     {
-                        IntPtr h11 = FindWindow("TopLevelWindowForOverflowXamlIsland", null);
-                        if (h11 != IntPtr.Zero)
-                        {
-                            MoveOverflowToAnchor(h11, anchorCenterX, dockTopPx, dockBottomPx, isTop);
-                            ShowWindowAsync(h11, SW_SHOW);
-                            SetForegroundWindow(h11);
-                            if (tray != IntPtr.Zero) GhostTaskbar(tray);
-                            opened = WaitAndAnchorOverflow(tray, anchorCenterX, dockTopPx, dockBottomPx, isTop, 200);
-                        }
+                        if (tray != IntPtr.Zero) GhostTaskbar(tray);
+                        SendKeyPress(VK_SPACE);
+                        opened = WaitAndAnchorOverflow(tray, anchorCenterX, dockTopPx, dockBottomPx, isTop, 360);
                     }
+
+                    // 6. Stage C: Re-focus with Win+B -> Enter (handles slower Win11 auto-hide wakeups)
+                    if (!opened)
+                    {
+                        SendWinCombo(VK_B);
+                        GhostSleep(tray, 260);
+                        SendKeyPress(VK_RETURN);
+                        opened = WaitAndAnchorOverflow(tray, anchorCenterX, dockTopPx, dockBottomPx, isTop, 360);
+                    }
+
+                    // 7. Stage D: Legacy Windows 10 NotifyIconOverflowWindow direct fallback (never Win11 XAML host)
                     if (!opened)
                     {
                         IntPtr h10 = FindWindow("NotifyIconOverflowWindow", null);
@@ -863,29 +890,16 @@ namespace Monolith
                             ShowWindowAsync(h10, SW_SHOW);
                             SetForegroundWindow(h10);
                             if (tray != IntPtr.Zero) GhostTaskbar(tray);
-                            opened = WaitAndAnchorOverflow(tray, anchorCenterX, dockTopPx, dockBottomPx, isTop, 200);
+                            opened = WaitAndAnchorOverflow(tray, anchorCenterX, dockTopPx, dockBottomPx, isTop, 220);
                         }
                     }
 
-                    // 6. Stage C: Win+B -> Space fallback while keeping Shell_TrayWnd ghosted & anchoring immediately
-                    if (!opened)
-                    {
-                        if (tray != IntPtr.Zero) GhostTaskbar(tray);
-                        SendWinCombo(VK_B);
-                        if (tray != IntPtr.Zero) GhostTaskbar(tray);
-                        Thread.Sleep(100);
-                        SendKeyPress(VK_SPACE);
-                        if (tray != IntPtr.Zero) GhostTaskbar(tray);
-                        opened = WaitAndAnchorOverflow(tray, anchorCenterX, dockTopPx, dockBottomPx, isTop, 320);
-                    }
-
-                    // 7. Re-anchor twice after Windows' short slide-in animation settles
+                    // 8. Re-anchor smoothly while Windows' flyout entrance animation settles
                     if (opened)
                     {
-                        for (int k = 0; k < 4; k++)
+                        for (int k = 0; k < 6; k++)
                         {
-                            Thread.Sleep(45);
-                            if (tray != IntPtr.Zero) GhostTaskbar(tray);
+                            GhostSleep(tray, 45);
                             RepositionHiddenIconsFlyout(anchorCenterX, dockTopPx, dockBottomPx, isTop);
                         }
                     }
@@ -942,13 +956,14 @@ namespace Monolith
                         try { cls = el.Current.ClassName ?? ""; } catch { }
                         try { name = el.Current.Name ?? ""; } catch { }
 
-                        string lowerName = name.ToLowerInvariant();
+                        string lowerName = name.ToLower(System.Globalization.CultureInfo.CurrentCulture);
+                        string lowerInv = name.ToLowerInvariant();
                         string lowerCls = cls.ToLowerInvariant();
                         if (lowerCls.IndexOf("chevron", StringComparison.Ordinal) >= 0 ||
                             lowerName.IndexOf("gizli", StringComparison.Ordinal) >= 0 ||
-                            lowerName.IndexOf("hidden", StringComparison.Ordinal) >= 0 ||
-                            lowerName.IndexOf("chevron", StringComparison.Ordinal) >= 0 ||
-                            lowerName.IndexOf("overflow", StringComparison.Ordinal) >= 0 ||
+                            lowerInv.IndexOf("hidden", StringComparison.Ordinal) >= 0 ||
+                            lowerInv.IndexOf("chevron", StringComparison.Ordinal) >= 0 ||
+                            lowerInv.IndexOf("overflow", StringComparison.Ordinal) >= 0 ||
                             lowerName.IndexOf("taşma", StringComparison.Ordinal) >= 0 ||
                             lowerName.IndexOf("bildirim köşesi", StringComparison.Ordinal) >= 0)
                         {

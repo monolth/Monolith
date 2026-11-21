@@ -299,6 +299,7 @@ namespace Monolith
         private bool _autoHidePeeking = true;
         private int _autoHideCooldown = 0;
         private bool _trayFlyoutActive = false;
+        private bool _trayFlyoutOpening = false;
         private bool _tempNativeTaskbarShown = false;
         private DateTime _trayFlyoutStartedUtc = DateTime.MinValue;
         private Border _trayChevronBtn;
@@ -1586,7 +1587,7 @@ namespace Monolith
                 NativeWin32.RepositionHiddenIconsFlyout(_trayAnchorX, _trayDockTopPx, _trayDockBottomPx, _cfg.IsTop);
 
                 double elapsedMs = (DateTime.UtcNow - _trayFlyoutStartedUtc).TotalMilliseconds;
-                if (elapsedMs > 850)
+                if (!_trayFlyoutOpening && elapsedMs > 550)
                 {
                     bool flyoutOpen = NativeWin32.IsHiddenIconsFlyoutOpen();
                     if (!flyoutOpen)
@@ -2003,6 +2004,8 @@ namespace Monolith
             _tooltip.HideTip();
             ComputeTrayAnchorPixels();
 
+            if (_trayFlyoutOpening) return;
+
             if (_trayFlyoutActive && NativeWin32.IsHiddenIconsFlyoutOpen())
             {
                 _trayFlyoutActive = false;
@@ -2019,6 +2022,7 @@ namespace Monolith
             }
 
             _trayFlyoutActive = true;
+            _trayFlyoutOpening = true;
             _trayFlyoutStartedUtc = DateTime.UtcNow;
             UpdateTrayChevronVisual(true);
 
@@ -2026,9 +2030,14 @@ namespace Monolith
             {
                 Dispatcher.BeginInvoke(new Action(delegate
                 {
+                    _trayFlyoutOpening = false;
+                    _trayFlyoutStartedUtc = DateTime.UtcNow;
                     if (!opened)
                     {
-                        _trayFlyoutStartedUtc = DateTime.UtcNow;
+                        _trayFlyoutActive = false;
+                        UpdateTrayChevronVisual(false);
+                        if (_cfg.HideWindowsTaskbar && !_tempNativeTaskbarShown && !_exiting)
+                            NativeWin32.HideNativeTaskbars();
                     }
                 }));
             });
