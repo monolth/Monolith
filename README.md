@@ -20,11 +20,15 @@
   </a>
 </p>
 
-## Download
+## Download & Uninstallation
 
 - **Installer (Recommended):** [Download MonolithSetup.exe](https://github.com/monolth/Monolith/releases/latest/download/MonolithSetup.exe)
 - **Portable (No Install):** [Download Monolith.exe](https://github.com/monolth/Monolith/releases/latest/download/Monolith.exe)
 - **All Releases:** [github.com/monolth/Monolith/releases](https://github.com/monolth/Monolith/releases)
+
+To uninstall Monolith, use **Windows Settings → Apps → Installed Apps → Monolith → Uninstall**, or re-run `MonolithSetup.exe` / `MonolithUninstall.exe` to cleanly remove all files and restore the default Windows taskbar.
+
+*This project uses the [SignPath Foundation](https://signpath.org) for open-source code signing. See our [Code signing policy](#code-signing-policy) below.*
 
 **Monolith** is a lightweight, open-source **Spatial Glass desktop dock & live widget taskbar** for Windows 10 and Windows 11, built natively in C# / WPF (.NET Framework 4.x) with zero external runtime or SDK dependencies.
 
@@ -62,9 +66,22 @@ powershell -ExecutionPolicy Bypass -File .\build.ps1
 powershell -ExecutionPolicy Bypass -File .\build_installer.ps1
 ```
 
-## Privacy & Security
+## Privacy policy
 
-Monolith runs 100% locally on your Windows PC and does **not** collect telemetry, analytics, or personal data. Optional online widgets (Weather, Crypto/FX, GitHub Heatmap) only fetch public read-only API data when enabled.
+This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.
+
+Monolith runs 100% locally on your Windows PC and does **not** collect telemetry, analytics, or personal data. Optional online widgets (Weather, Crypto/FX, GitHub Heatmap), if explicitly enabled by the user, only fetch public read-only data from their respective public APIs.
+
+## Code signing policy
+
+Free code signing provided by [SignPath.io](https://signpath.io), certificate by [SignPath Foundation](https://signpath.org).
+
+### Team roles
+- **Authors (Committers):** [@monolth](https://github.com/monolth)
+- **Reviewers:** [@monolth](https://github.com/monolth)
+- **Approvers:** [@monolth](https://github.com/monolth)
+
+All release binaries (`Monolith.exe` and `MonolithSetup.exe`) are built exclusively from this public source repository via automated GitHub Actions workflows (`.github/workflows/build.yml`) and require manual approval before signing.
 
 ## License
 
