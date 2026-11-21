@@ -636,7 +636,12 @@ namespace Monolith
 
         private void SyncDesktopWorkArea()
         {
-            if (!_cfg.HideWindowsTaskbar || _tempNativeTaskbarShown || _exiting) return;
+            if (_exiting) return;
+            if (!_cfg.HideWindowsTaskbar || _tempNativeTaskbarShown)
+            {
+                NativeWin32.RemoveMonolithAppBar();
+                return;
+            }
             try
             {
                 PresentationSource src = PresentationSource.FromVisual(this);
@@ -646,7 +651,7 @@ namespace Monolith
                 int reservePx = _cfg.FullWidth
                     ? (int)Math.Round(_metrics.BarHeight * dpiY)
                     : (int)Math.Round((_metrics.BarHeight + _metrics.EdgeMargin + 4) * dpiY);
-                NativeWin32.ApplyDesktopWorkArea(shouldReserve, _cfg.IsTop, reservePx);
+                NativeWin32.ConfigureMonolithAppBar(shouldReserve, _cfg.IsTop, reservePx);
             }
             catch { }
         }
@@ -1562,11 +1567,10 @@ namespace Monolith
                 ApplyVisibility();
             }
 
-            // Keep native taskbar hidden and work area clean if user selected it (unless hidden icons tray is currently open)
+            // Keep native taskbar hidden if user selected it (zero work-area bouncing!)
             if (_cfg.HideWindowsTaskbar && !_exiting && !_trayFlyoutActive && !_tempNativeTaskbarShown)
             {
                 NativeWin32.HideNativeTaskbars();
-                SyncDesktopWorkArea();
             }
         }
 
@@ -2086,7 +2090,11 @@ namespace Monolith
                 {
                     _tempNativeTaskbarShown = !_tempNativeTaskbarShown;
                     if (_tempNativeTaskbarShown) NativeWin32.RestoreNativeTaskbars();
-                    else if (_cfg.HideWindowsTaskbar) NativeWin32.HideNativeTaskbars();
+                    else if (_cfg.HideWindowsTaskbar)
+                    {
+                        NativeWin32.HideNativeTaskbars();
+                        SyncDesktopWorkArea();
+                    }
                 }
             });
             items.Add(new GlassMenuItemDef

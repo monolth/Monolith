@@ -90,13 +90,19 @@ namespace Monolith
         public const byte VK_MEDIA_PLAY_PAUSE = 0xB3;
         public const uint KEYEVENTF_KEYUP = 0x0002;
 
-        public const uint SPI_SETWORKAREA = 0x002F;
-        public const uint SPI_GETWORKAREA = 0x0030;
         public const uint SPI_GETDESKWALLPAPER = 0x0073;
-        public const uint SPIF_SENDCHANGE = 0x0002;
-        public const int WM_SETTINGCHANGE = 0x001A;
         public const int QUNS_RUNNING_D3D_FULL_SCREEN = 3;
         public const int QUNS_PRESENTATION_MODE = 4;
+
+        public const uint ABM_NEW = 0x00000000;
+        public const uint ABM_REMOVE = 0x00000001;
+        public const uint ABM_QUERYPOS = 0x00000002;
+        public const uint ABM_SETPOS = 0x00000003;
+        public const uint ABM_GETSTATE = 0x00000004;
+        public const uint ABM_SETSTATE = 0x0000000A;
+        public const uint ABS_AUTOHIDE = 0x00000001;
+        public const uint ABE_TOP = 1;
+        public const uint ABE_BOTTOM = 3;
         public const uint SHGFI_ICON = 0x000000100;
         public const uint SHGFI_LARGEICON = 0x000000000;
         public const uint SHGFI_USEFILEATTRIBUTES = 0x000000010;
@@ -193,6 +199,17 @@ namespace Monolith
         }
 
         [StructLayout(LayoutKind.Sequential)]
+        public struct APPBARDATA
+        {
+            public int cbSize;
+            public IntPtr hWnd;
+            public uint uCallbackMessage;
+            public uint uEdge;
+            public RECT rc;
+            public IntPtr lParam;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
         public struct SHQUERYRBINFO
         {
             public int cbSize;
@@ -236,11 +253,11 @@ namespace Monolith
         [DllImport("user32.dll")]
         public static extern bool IsZoomed(IntPtr hWnd);
 
-        [DllImport("user32.dll", SetLastError = true)]
-        public static extern bool SystemParametersInfo(uint uiAction, uint uiParam, ref RECT pvParam, uint fWinIni);
-
         [DllImport("shell32.dll")]
         public static extern int SHQueryUserNotificationState(out int pquns);
+
+        [DllImport("shell32.dll", CallingConvention = CallingConvention.StdCall)]
+        public static extern IntPtr SHAppBarMessage(uint dwMessage, ref APPBARDATA pData);
 
         [DllImport("user32.dll")]
         public static extern IntPtr GetWindow(IntPtr hWnd, uint uCmd);
@@ -1074,82 +1091,165 @@ namespace Monolith
             catch { return false; }
         }
 
-        // ====== Taskbar Management (Safe, Invisible-Ghost & Always Restorable) ======
+        // ====== Taskbar & Native AppBar Management (Zero-Bounce, Crash-Safe & Always Restorable) ======
         private static readonly Dictionary<IntPtr, bool> HiddenTaskbars = new Dictionary<IntPtr, bool>();
         private static readonly Dictionary<IntPtr, int> OriginalTaskbarExStyles = new Dictionary<IntPtr, int>();
-        private static bool _hasSavedWorkArea = false;
-        private static RECT _savedWorkArea;
+        private static bool _savedNativeAutoHideValid = false;
+        private static uint _savedNativeAutoHideState = 0;
+        private static bool _nativeAutoHideApplied = false;
+        private static IntPtr _lastAutoHideTrayHwnd = IntPtr.Zero;
+
+        private static HwndSource _monolithAppBarHost = null;
+        private static bool _monolithAppBarRegistered = false;
+        private static string _lastAppBarSig = "";
 
         /// <summary>
-        /// Configures desktop work area when Windows native taskbar is hidden:
-        /// - reserveSpace=false: expands full-screen (zero 48px wallpaper strip at bottom).
-        /// - reserveSpace=true: reserves exact height for Monolith so maximized windows stop cleanly above it.
-        /// Always restored automatically on exit or when unhiding the native taskbar.
+        /// Sets the native Windows taskbar to ABS_AUTOHIDE cleanly (once per Shell_TrayWnd handle!) so Explorer itself
+        /// releases the 48px work area strip with ZERO bouncing or SPI_SETWORKAREA tug-of-war.
+        /// Always restored on exit.
         /// </summary>
-        public static void ApplyDesktopWorkArea(bool reserveSpace, bool isTop, int reserveHeightPx)
+        public static void EnableNativeTaskbarAutoHideOnce()
         {
             try
             {
-                RECT cur = new RECT();
-                if (!SystemParametersInfo(SPI_GETWORKAREA, 0, ref cur, 0)) return;
-                if (!_hasSavedWorkArea)
+                IntPtr tray = FindWindow("Shell_TrayWnd", null);
+                if (tray == IntPtr.Zero) return;
+                if (_nativeAutoHideApplied && _lastAutoHideTrayHwnd == tray) return;
+
+                APPBARDATA abd = new APPBARDATA();
+                abd.cbSize = Marshal.SizeOf(typeof(APPBARDATA));
+                abd.hWnd = tray;
+
+                if (!_savedNativeAutoHideValid)
                 {
-                    _savedWorkArea = cur;
-                    _hasSavedWorkArea = true;
+                    _savedNativeAutoHideState = (uint)SHAppBarMessage(ABM_GETSTATE, ref abd).ToInt64();
+                    _savedNativeAutoHideValid = true;
+                }
+
+                uint curState = (uint)SHAppBarMessage(ABM_GETSTATE, ref abd).ToInt64();
+                if ((curState & ABS_AUTOHIDE) == 0)
+                {
+                    abd.lParam = (IntPtr)(curState | ABS_AUTOHIDE);
+                    SHAppBarMessage(ABM_SETSTATE, ref abd);
+                }
+                _nativeAutoHideApplied = true;
+                _lastAutoHideTrayHwnd = tray;
+            }
+            catch { }
+        }
+
+        public static void RestoreNativeTaskbarAutoHide()
+        {
+            _nativeAutoHideApplied = false;
+            _lastAutoHideTrayHwnd = IntPtr.Zero;
+            if (!_savedNativeAutoHideValid) return;
+            try
+            {
+                IntPtr tray = FindWindow("Shell_TrayWnd", null);
+                if (tray != IntPtr.Zero)
+                {
+                    APPBARDATA abd = new APPBARDATA();
+                    abd.cbSize = Marshal.SizeOf(typeof(APPBARDATA));
+                    abd.hWnd = tray;
+                    abd.lParam = (IntPtr)_savedNativeAutoHideState;
+                    SHAppBarMessage(ABM_SETSTATE, ref abd);
+                }
+                _savedNativeAutoHideValid = false;
+            }
+            catch { }
+        }
+
+        /// <summary>
+        /// Registers or updates Monolith's own native Windows AppBar reservation (only in ReserveSpace / FullWidth mode)
+        /// using an invisible helper HWND so Windows Explorer coordinates work area cleanly with zero bouncing.
+        /// </summary>
+        public static void ConfigureMonolithAppBar(bool reserveSpace, bool isTop, int reserveHeightPx)
+        {
+            try
+            {
+                if (!reserveSpace || reserveHeightPx <= 0)
+                {
+                    RemoveMonolithAppBar();
+                    return;
                 }
 
                 int sw = GetSystemMetrics(0);
                 int sh = GetSystemMetrics(1);
-                if (sw < 200 || sh < 200) return;
+                if (sw < 200 || sh < 200 || reserveHeightPx >= sh / 3) return;
 
-                RECT target = new RECT { Left = 0, Top = 0, Right = sw, Bottom = sh };
-                if (reserveSpace && reserveHeightPx > 0 && reserveHeightPx < sh / 3)
-                {
-                    if (isTop) target.Top = reserveHeightPx;
-                    else target.Bottom = sh - reserveHeightPx;
-                }
-
-                if (cur.Left == target.Left && cur.Top == target.Top && cur.Right == target.Right && cur.Bottom == target.Bottom)
+                string sig = (isTop ? "T" : "B") + "|" + reserveHeightPx + "|" + sw + "x" + sh;
+                if (_monolithAppBarRegistered && sig == _lastAppBarSig)
                     return;
 
-                SystemParametersInfo(SPI_SETWORKAREA, 0, ref target, SPIF_SENDCHANGE);
-                NudgeMaximizedWindowsToWorkArea();
-            }
-            catch { }
-        }
-
-        public static void RestoreDesktopWorkArea()
-        {
-            if (!_hasSavedWorkArea) return;
-            try
-            {
-                RECT orig = _savedWorkArea;
-                _hasSavedWorkArea = false;
-                SystemParametersInfo(SPI_SETWORKAREA, 0, ref orig, SPIF_SENDCHANGE);
-                NudgeMaximizedWindowsToWorkArea();
-            }
-            catch { }
-        }
-
-        private static void NudgeMaximizedWindowsToWorkArea()
-        {
-            try
-            {
-                uint ownPid = (uint)Process.GetCurrentProcess().Id;
-                EnumWindows(delegate(IntPtr hWnd, IntPtr lParam)
+                if (_monolithAppBarHost == null)
                 {
-                    if (!IsWindowVisible(hWnd) || !IsZoomed(hWnd)) return true;
-                    uint pid;
-                    GetWindowThreadProcessId(hWnd, out pid);
-                    if (pid == ownPid) return true;
-                    IntPtr res;
-                    SendMessageTimeout(hWnd, WM_SETTINGCHANGE, (IntPtr)SPI_SETWORKAREA, IntPtr.Zero, 2, 50, out res);
-                    SetWindowPos(hWnd, IntPtr.Zero, 0, 0, 0, 0,
-                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
-                    return true;
-                }, IntPtr.Zero);
+                    HwndSourceParameters p = new HwndSourceParameters("MonolithAppBarReserve");
+                    p.Width = sw;
+                    p.Height = reserveHeightPx;
+                    p.PositionX = 0;
+                    p.PositionY = isTop ? 0 : (sh - reserveHeightPx);
+                    p.WindowStyle = unchecked((int)0x80000000); // WS_POPUP (hidden, never shown)
+                    p.ExtendedWindowStyle = WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT;
+                    _monolithAppBarHost = new HwndSource(p);
+                }
+
+                IntPtr hwnd = _monolithAppBarHost.Handle;
+                if (hwnd == IntPtr.Zero) return;
+
+                APPBARDATA abd = new APPBARDATA();
+                abd.cbSize = Marshal.SizeOf(typeof(APPBARDATA));
+                abd.hWnd = hwnd;
+                abd.uCallbackMessage = 0x0400 + 77; // WM_USER + 77
+
+                if (!_monolithAppBarRegistered)
+                {
+                    SHAppBarMessage(ABM_NEW, ref abd);
+                    _monolithAppBarRegistered = true;
+                }
+
+                abd.uEdge = isTop ? ABE_TOP : ABE_BOTTOM;
+                abd.rc = new RECT
+                {
+                    Left = 0,
+                    Right = sw,
+                    Top = isTop ? 0 : (sh - reserveHeightPx),
+                    Bottom = isTop ? reserveHeightPx : sh
+                };
+
+                SHAppBarMessage(ABM_QUERYPOS, ref abd);
+                if (isTop) abd.rc.Bottom = abd.rc.Top + reserveHeightPx;
+                else abd.rc.Top = abd.rc.Bottom - reserveHeightPx;
+
+                SHAppBarMessage(ABM_SETPOS, ref abd);
+                SetWindowPos(hwnd, IntPtr.Zero, abd.rc.Left, abd.rc.Top,
+                    Math.Max(1, abd.rc.Right - abd.rc.Left),
+                    Math.Max(1, abd.rc.Bottom - abd.rc.Top),
+                    SWP_NOZORDER | SWP_NOACTIVATE);
+                _lastAppBarSig = sig;
             }
             catch { }
+        }
+
+        public static void RemoveMonolithAppBar()
+        {
+            try
+            {
+                if (_monolithAppBarRegistered && _monolithAppBarHost != null && _monolithAppBarHost.Handle != IntPtr.Zero)
+                {
+                    APPBARDATA abd = new APPBARDATA();
+                    abd.cbSize = Marshal.SizeOf(typeof(APPBARDATA));
+                    abd.hWnd = _monolithAppBarHost.Handle;
+                    SHAppBarMessage(ABM_REMOVE, ref abd);
+                }
+            }
+            catch { }
+            _monolithAppBarRegistered = false;
+            _lastAppBarSig = "";
+            if (_monolithAppBarHost != null)
+            {
+                try { _monolithAppBarHost.Dispose(); } catch { }
+                _monolithAppBarHost = null;
+            }
         }
 
         public static void GhostTaskbar(IntPtr hWnd)
@@ -1211,6 +1311,7 @@ namespace Monolith
         {
             try
             {
+                EnableNativeTaskbarAutoHideOnce();
                 EnumWindows(delegate(IntPtr hWnd, IntPtr lParam)
                 {
                     string cls = GetWindowClassName(hWnd);
@@ -1218,8 +1319,13 @@ namespace Monolith
                     {
                         if (!HiddenTaskbars.ContainsKey(hWnd))
                             HiddenTaskbars[hWnd] = IsWindowVisible(hWnd);
-                        GhostTaskbar(hWnd);
-                        ShowWindow(hWnd, SW_HIDE);
+                        if (!OriginalTaskbarExStyles.ContainsKey(hWnd))
+                            GhostTaskbar(hWnd);
+                        if (IsWindowVisible(hWnd))
+                        {
+                            GhostTaskbar(hWnd);
+                            ShowWindow(hWnd, SW_HIDE);
+                        }
                     }
                     return true;
                 }, IntPtr.Zero);
@@ -1231,6 +1337,8 @@ namespace Monolith
         {
             try
             {
+                RemoveMonolithAppBar();
+
                 foreach (KeyValuePair<IntPtr, bool> kv in HiddenTaskbars)
                 {
                     if (IsWindow(kv.Key))
@@ -1253,7 +1361,7 @@ namespace Monolith
                     return true;
                 }, IntPtr.Zero);
 
-                RestoreDesktopWorkArea();
+                RestoreNativeTaskbarAutoHide();
             }
             catch { }
         }
