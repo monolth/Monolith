@@ -1,0 +1,8 @@
+# Build outputs (publish via GitHub Releases)
+Monolith.exe
+MonolithSetup.exe
+dist/
+installer/*.gz
+*.pdb
+*.user
+.vs/

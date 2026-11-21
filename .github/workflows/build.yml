@@ -1,0 +1,57 @@
+name: Build & Release Monolith
+
+on:
+  push:
+    branches: [ main, master ]
+    tags: [ 'v*' ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build Monolith.exe and MonolithSetup.exe
+        shell: powershell
+        run: |
+          .\build_installer.ps1
+
+      - name: Upload build artifacts
+        id: upload-artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: monolith-windows-binaries
+          path: |
+            Monolith.exe
+            dist/MonolithSetup.exe
+
+      # --- Optional: Enable after SignPath Foundation approval ---
+      # 1. Add SIGNPATH_API_TOKEN and SIGNPATH_ORG_ID in Settings -> Secrets -> Actions
+      # 2. Uncomment the step below to auto-sign binaries before releasing:
+      #
+      # - name: Submit signing request to SignPath Foundation
+      #   if: startsWith(github.ref, 'refs/tags/v')
+      #   uses: signpath/github-action-submit-signing-request@v3
+      #   with:
+      #     api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
+      #     organization-id: '${{ secrets.SIGNPATH_ORG_ID }}'
+      #     project-slug: 'monolith'
+      #     signing-policy-slug: 'release-signing'
+      #     github-artifact-id: '${{ steps.upload-artifacts.outputs.artifact-id }}'
+      #     wait-for-completion: true
+      #     output-artifact-directory: 'signed'
+
+      - name: Create GitHub Release (on v* tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          gh release create $tag Monolith.exe dist\MonolithSetup.exe --title "Monolith $tag" --notes "Monolith $tag release built automatically via GitHub Actions."
