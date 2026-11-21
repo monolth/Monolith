@@ -32,7 +32,7 @@ namespace MonolithSetup
 
     internal static class InstallerCore
     {
-        public const string AppVersion = "1.0.3";
+        public const string AppVersion = "1.0.4";
         private const string UninstallRegPath = @"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Monolith";
         private const string RunRegPath = @"SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
 

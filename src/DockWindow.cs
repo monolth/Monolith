@@ -319,6 +319,7 @@ namespace Monolith
         private PopoverWindow _activePopover;
         private ControlCenterWindow _controlCenterWin;
         private SpotlightWindow _spotlightWin;
+        private DateTime _spotlightClosedUtc = DateTime.MinValue;
         private WidgetPickerWindow _pickerWin;
         private SettingsWindow _settingsWin;
         private Forms.NotifyIcon _trayIcon;
@@ -1916,8 +1917,16 @@ namespace Monolith
                 _spotlightWin = null;
                 return;
             }
+            // Prevent immediate reopen when user clicks the Search icon while Spotlight was open (Deactivated closes it first)
+            if ((DateTime.UtcNow - _spotlightClosedUtc).TotalMilliseconds < 260)
+                return;
+
             _spotlightWin = new SpotlightWindow(this, _cfg, _palette, OpenWidgetPicker, OpenSettings);
-            _spotlightWin.Closed += delegate { _spotlightWin = null; };
+            _spotlightWin.Closed += delegate
+            {
+                _spotlightWin = null;
+                _spotlightClosedUtc = DateTime.UtcNow;
+            };
             _spotlightWin.Show();
             _spotlightWin.Activate();
         }

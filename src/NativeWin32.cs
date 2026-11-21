@@ -288,6 +288,9 @@ namespace Monolith
         public static extern bool SetLayeredWindowAttributes(IntPtr hwnd, uint crKey, byte bAlpha, uint dwFlags);
 
         [DllImport("user32.dll", SetLastError = true)]
+        public static extern bool GetLayeredWindowAttributes(IntPtr hwnd, out uint pcrKey, out byte pbAlpha, out uint pdwFlags);
+
+        [DllImport("user32.dll", SetLastError = true)]
         public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
 
         [DllImport("user32.dll")]
@@ -473,7 +476,7 @@ namespace Monolith
         {
             ThreadPool.QueueUserWorkItem(delegate
             {
-                Thread.Sleep(35);
+                Thread.Sleep(65);
                 SendWinCombo((byte)VK_S);
             });
         }
@@ -1363,7 +1366,13 @@ namespace Monolith
                     SetWindowPos(hWnd, IntPtr.Zero, 0, 0, 0, 0,
                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
                 }
-                SetLayeredWindowAttributes(hWnd, 0, 0, LWA_ALPHA);
+
+                uint ck, fl;
+                byte al;
+                if (!GetLayeredWindowAttributes(hWnd, out ck, out al, out fl) || (fl & LWA_ALPHA) == 0 || al != 0)
+                {
+                    SetLayeredWindowAttributes(hWnd, 0, 0, LWA_ALPHA);
+                }
             }
             catch { }
         }
@@ -1414,12 +1423,13 @@ namespace Monolith
                     {
                         if (!HiddenTaskbars.ContainsKey(hWnd))
                             HiddenTaskbars[hWnd] = IsWindowVisible(hWnd);
-                        if (!OriginalTaskbarExStyles.ContainsKey(hWnd))
-                            GhostTaskbar(hWnd);
-                        if (IsWindowVisible(hWnd))
+                        // Keep Shell_TrayWnd WS_VISIBLE + alpha=0 + click-through (NEVER SW_HIDE!)
+                        // Hiding Shell_TrayWnd with SW_HIDE breaks Windows 11 SearchHost (Win+S) and Start Menu Search!
+                        GhostTaskbar(hWnd);
+                        if (!IsWindowVisible(hWnd))
                         {
+                            ShowWindow(hWnd, SW_SHOWNA);
                             GhostTaskbar(hWnd);
-                            ShowWindow(hWnd, SW_HIDE);
                         }
                     }
                     return true;

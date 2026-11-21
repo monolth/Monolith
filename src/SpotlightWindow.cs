@@ -55,6 +55,8 @@ namespace Monolith
         private string _activeFilter = "All"; // "All", "App", "Setting", "File", "Web"
         private List<SpotlightResult> _currentResults = new List<SpotlightResult>();
         private List<SpotlightResult> _asyncFileResults = new List<SpotlightResult>();
+        private readonly List<Border> _rowBorders = new List<Border>();
+        private readonly List<TextBlock> _rowTitles = new List<TextBlock>();
         private int _selectedIndex = 0;
         private int _searchGen = 0;
         private readonly Dictionary<string, ImageSource> _iconCache = new Dictionary<string, ImageSource>(StringComparer.OrdinalIgnoreCase);
@@ -63,7 +65,8 @@ namespace Monolith
         {
             if (_indexedApps != null || _indexing) return;
             _indexing = true;
-            ThreadPool.QueueUserWorkItem(delegate
+            // Use an STA background thread so late-bound COM Shell.Application ("shell:AppsFolder") works reliably!
+            Thread t = new Thread(delegate()
             {
                 try
                 {
@@ -82,6 +85,8 @@ namespace Monolith
 
                     ScanRegistryAppPaths(Registry.LocalMachine, found, seen);
                     ScanRegistryAppPaths(Registry.CurrentUser, found, seen);
+                    ScanShellAppsFolder(found, seen);
+                    AddEssentialWindowsCommands(found, seen);
 
                     found.Sort(delegate(PinnedAppItem a, PinnedAppItem b)
                     {
@@ -92,6 +97,138 @@ namespace Monolith
                 catch { }
                 finally { _indexing = false; }
             });
+            t.IsBackground = true;
+            try { t.SetApartmentState(ApartmentState.STA); } catch { }
+            t.Start();
+        }
+
+        private static void ScanShellAppsFolder(List<PinnedAppItem> list, HashSet<string> seen)
+        {
+            object shell = null;
+            try
+            {
+                Type shellType = Type.GetTypeFromProgID("Shell.Application");
+                if (shellType == null) return;
+                shell = Activator.CreateInstance(shellType);
+                object folder = shellType.InvokeMember("NameSpace", System.Reflection.BindingFlags.InvokeMethod, null, shell, new object[] { "shell:AppsFolder" });
+                if (folder == null) return;
+                object items = folder.GetType().InvokeMember("Items", System.Reflection.BindingFlags.InvokeMethod, null, folder, null);
+                if (items == null) return;
+                int count = Convert.ToInt32(items.GetType().InvokeMember("Count", System.Reflection.BindingFlags.GetProperty, null, items, null));
+
+                for (int i = 0; i < count; i++)
+                {
+                    try
+                    {
+                        object item = items.GetType().InvokeMember("Item", System.Reflection.BindingFlags.InvokeMethod, null, items, new object[] { i });
+                        if (item == null) continue;
+                        string name = item.GetType().InvokeMember("Name", System.Reflection.BindingFlags.GetProperty, null, item, null) as string;
+                        string path = item.GetType().InvokeMember("Path", System.Reflection.BindingFlags.GetProperty, null, item, null) as string;
+                        if (string.IsNullOrEmpty(name) || string.IsNullOrEmpty(path)) continue;
+
+                        string norm = NormalizeSearch(name);
+                        if (norm.IndexOf("uninstall", StringComparison.Ordinal) >= 0 ||
+                            norm.IndexOf("kaldir", StringComparison.Ordinal) >= 0 ||
+                            norm.IndexOf("readme", StringComparison.Ordinal) >= 0)
+                            continue;
+                        if (path.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
+                            path.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+                            continue;
+
+                        if (seen.Add(name))
+                        {
+                            bool realFile = File.Exists(path);
+                            list.Add(new PinnedAppItem
+                            {
+                                Name = name,
+                                Path = realFile ? path : ("shell:AppsFolder\\" + path),
+                                IconPath = realFile ? path : "",
+                                Glyph = "\uE71D"
+                            });
+                        }
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+            finally
+            {
+                if (shell != null)
+                {
+                    try { System.Runtime.InteropServices.Marshal.FinalReleaseComObject(shell); } catch { }
+                }
+            }
+        }
+
+        private static void AddEssentialWindowsCommands(List<PinnedAppItem> list, HashSet<string> seen)
+        {
+            string sys = Environment.SystemDirectory;
+            string[,] cmds = new string[,]
+            {
+                { "Komut İstemi (CMD)",        Path.Combine(sys, "cmd.exe"),          "\uE756" },
+                { "Windows PowerShell",        Path.Combine(sys, @"WindowsPowerShell\v1.0\powershell.exe"), "\uE756" },
+                { "Denetim Masası (Control)",  Path.Combine(sys, "control.exe"),      "\uE713" },
+                { "Kayıt Defteri (Regedit)",   Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "regedit.exe"), "\uE74C" },
+                { "Görev Yöneticisi (Taskmgr)",Path.Combine(sys, "Taskmgr.exe"),      "\uE9D9" },
+                { "Hesap Makinesi (Calc)",     Path.Combine(sys, "calc.exe"),         "\uE8EF" },
+                { "Not Defteri (Notepad)",     Path.Combine(sys, "notepad.exe"),      "\uE70B" },
+                { "Paint",                     Path.Combine(sys, "mspaint.exe"),      "\uE790" },
+                { "Uzak Masaüstü (MSTSC)",     Path.Combine(sys, "mstsc.exe"),        "\uE7F4" },
+                { "Aygıt Yöneticisi",          Path.Combine(sys, "devmgmt.msc"),      "\uE950" },
+                { "Hizmetler (Services)",      Path.Combine(sys, "services.msc"),     "\uE90F" },
+                { "Disk Yönetimi",             Path.Combine(sys, "diskmgmt.msc"),     "\uEDA2" },
+                { "DirectX Tanı (dxdiag)",     Path.Combine(sys, "dxdiag.exe"),       "\uE9D9" }
+            };
+            for (int i = 0; i < cmds.GetLength(0); i++)
+            {
+                string name = cmds[i, 0];
+                string p = cmds[i, 1];
+                string g = cmds[i, 2];
+                if (File.Exists(p) && seen.Add(name))
+                    list.Add(new PinnedAppItem { Name = name, Path = p, IconPath = p, Glyph = g });
+            }
+        }
+
+        private static string NormalizeSearch(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return "";
+            char[] buf = new char[text.Length];
+            for (int i = 0; i < text.Length; i++)
+            {
+                char c = text[i];
+                switch (c)
+                {
+                    case 'İ': case 'I': case 'ı': case 'i': buf[i] = 'i'; break;
+                    case 'Ğ': case 'ğ': buf[i] = 'g'; break;
+                    case 'Ş': case 'ş': buf[i] = 's'; break;
+                    case 'Ç': case 'ç': buf[i] = 'c'; break;
+                    case 'Ö': case 'ö': buf[i] = 'o'; break;
+                    case 'Ü': case 'ü': buf[i] = 'u'; break;
+                    default:
+                        buf[i] = char.ToLowerInvariant(c);
+                        break;
+                }
+            }
+            return new string(buf);
+        }
+
+        private static bool MatchesQuery(string candidate, string normQuery)
+        {
+            if (string.IsNullOrEmpty(normQuery)) return true;
+            if (string.IsNullOrEmpty(candidate)) return false;
+            string normCand = NormalizeSearch(candidate);
+            if (normCand.IndexOf(normQuery, StringComparison.Ordinal) >= 0) return true;
+            if (normQuery.IndexOf(' ') > 0)
+            {
+                string[] terms = normQuery.Split(new char[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                for (int i = 0; i < terms.Length; i++)
+                {
+                    if (normCand.IndexOf(terms[i], StringComparison.Ordinal) < 0)
+                        return false;
+                }
+                return terms.Length > 0;
+            }
+            return false;
         }
 
         private static void ScanRegistryAppPaths(RegistryKey rootKey, List<PinnedAppItem> list, HashSet<string> seen)
@@ -391,6 +528,8 @@ namespace Monolith
                     e.Handled = true;
                     _activeFilter = key;
                     BuildFilterTabs();
+                    if (_activeFilter == "File")
+                        TriggerAsyncFileSearch(_searchBox != null ? (_searchBox.Text ?? "") : "");
                     RefreshBody();
                     _searchBox.Focus();
                 };
@@ -411,7 +550,7 @@ namespace Monolith
                 if (_currentResults.Count > 0)
                 {
                     _selectedIndex = (_selectedIndex + 1) % _currentResults.Count;
-                    RenderSearchModeResults();
+                    UpdateSelectionVisuals();
                 }
             }
             else if (e.Key == Key.Up)
@@ -420,7 +559,7 @@ namespace Monolith
                 if (_currentResults.Count > 0)
                 {
                     _selectedIndex = (_selectedIndex - 1 + _currentResults.Count) % _currentResults.Count;
-                    RenderSearchModeResults();
+                    UpdateSelectionVisuals();
                 }
             }
             else if (e.Key == Key.Enter)
@@ -694,6 +833,8 @@ namespace Monolith
         {
             if (_resultsPanel == null) return;
             _resultsPanel.Children.Clear();
+            _rowBorders.Clear();
+            _rowTitles.Clear();
 
             for (int i = 0; i < _currentResults.Count; i++)
             {
@@ -726,7 +867,7 @@ namespace Monolith
                 g.Children.Add(ico);
 
                 StackPanel txts = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
-                txts.Children.Add(new TextBlock
+                TextBlock titleTb = new TextBlock
                 {
                     Text = r.Title,
                     FontFamily = new FontFamily("Segoe UI"),
@@ -734,7 +875,8 @@ namespace Monolith
                     FontWeight = sel ? FontWeights.Bold : FontWeights.SemiBold,
                     Foreground = ThemeManager.Brush(_palette.TextPrimary),
                     TextTrimming = TextTrimming.CharacterEllipsis
-                });
+                };
+                txts.Children.Add(titleTb);
                 txts.Children.Add(new TextBlock
                 {
                     Text = r.Subtitle,
@@ -752,7 +894,7 @@ namespace Monolith
                     if (_selectedIndex != idx)
                     {
                         _selectedIndex = idx;
-                        RenderSearchModeResults();
+                        UpdateSelectionVisuals();
                     }
                 };
                 row.PreviewMouseLeftButtonDown += delegate(object s, MouseButtonEventArgs e)
@@ -761,9 +903,33 @@ namespace Monolith
                     _selectedIndex = idx;
                     ExecuteSelected();
                 };
+                _rowBorders.Add(row);
+                _rowTitles.Add(titleTb);
                 _resultsPanel.Children.Add(row);
             }
 
+            RenderRightPreview();
+        }
+
+        private void UpdateSelectionVisuals()
+        {
+            if (_rowBorders.Count != _currentResults.Count)
+            {
+                RenderSearchModeResults();
+                return;
+            }
+            Brush selBg = ThemeManager.Brush(Color.FromArgb(56, _palette.Accent.R, _palette.Accent.G, _palette.Accent.B));
+            Brush selBr = ThemeManager.Brush(Color.FromArgb(135, _palette.Accent.R, _palette.Accent.G, _palette.Accent.B));
+            for (int i = 0; i < _rowBorders.Count; i++)
+            {
+                bool sel = (i == _selectedIndex);
+                _rowBorders[i].Background = sel ? selBg : Brushes.Transparent;
+                _rowBorders[i].BorderBrush = sel ? selBr : Brushes.Transparent;
+                if (i < _rowTitles.Count)
+                    _rowTitles[i].FontWeight = sel ? FontWeights.Bold : FontWeights.SemiBold;
+            }
+            if (_selectedIndex >= 0 && _selectedIndex < _rowBorders.Count)
+                _rowBorders[_selectedIndex].BringIntoView();
             RenderRightPreview();
         }
 
@@ -881,10 +1047,35 @@ namespace Monolith
             return b;
         }
 
-        // ====== SEARCH ENGINE (Apps + 30 Windows Settings + Real Windows Search Index Files + Calc + Web) ======
+        // ====== SEARCH ENGINE (Apps + UWP/Store + 30 Windows Settings + Real Windows Search Index Files + Calc + Web) ======
         private void BuildSearchResults(string q)
         {
             List<SpotlightResult> list = new List<SpotlightResult>();
+            string normQ = NormalizeSearch(q);
+
+            // 0. Direct local path, ms-settings URI, or URL entered by user
+            if (!string.IsNullOrEmpty(q) && (_activeFilter == "All" || _activeFilter == "File" || _activeFilter == "Web"))
+            {
+                bool isDirectPath = (q.Length >= 3 && q[1] == ':' && (q[2] == '\\' || q[2] == '/')) && (File.Exists(q) || Directory.Exists(q));
+                bool isMsUri = q.StartsWith("ms-settings:", StringComparison.OrdinalIgnoreCase);
+                bool isUrl = q.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
+                             q.StartsWith("https://", StringComparison.OrdinalIgnoreCase) ||
+                             q.StartsWith("www.", StringComparison.OrdinalIgnoreCase);
+                if (isDirectPath || isMsUri || isUrl)
+                {
+                    string targetCopy = isUrl && q.StartsWith("www.", StringComparison.OrdinalIgnoreCase) ? ("https://" + q) : q;
+                    list.Add(new SpotlightResult
+                    {
+                        Title = L10n.T(_cfg, "Aç: ", "Open: ") + q,
+                        Subtitle = isDirectPath ? L10n.T(_cfg, "Yerel Konum", "Local Path") : (isMsUri ? "Windows Settings URI" : "Web URL"),
+                        Category = isDirectPath ? "File" : (isMsUri ? "Setting" : "Web"),
+                        FilePath = isDirectPath ? q : null,
+                        IconPath = isDirectPath ? q : null,
+                        Glyph = isDirectPath ? "\uE8B7" : (isMsUri ? "\uE713" : "\uE774"),
+                        Execute = delegate { LaunchTarget(targetCopy); }
+                    });
+                }
+            }
 
             // 1. Live math calculator
             double calcVal;
@@ -903,14 +1094,14 @@ namespace Monolith
                 });
             }
 
-            // 2. Installed Apps (Pinned + Start Menu + App Paths)
+            // 2. Installed Apps (Pinned + Start Menu + App Paths + shell:AppsFolder UWP/Store + Windows Tools)
             HashSet<string> addedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             if (_activeFilter == "All" || _activeFilter == "App")
             {
                 for (int i = 0; i < _cfg.PinnedApps.Count; i++)
                 {
                     PinnedAppItem p = _cfg.PinnedApps[i];
-                    if (string.IsNullOrEmpty(q) || p.Name.IndexOf(q, StringComparison.OrdinalIgnoreCase) >= 0)
+                    if (MatchesQuery(p.Name, normQ))
                     {
                         if (addedNames.Add(p.Name))
                         {
@@ -931,26 +1122,33 @@ namespace Monolith
 
                 if (_indexedApps != null)
                 {
-                    // Prioritize prefix matches first, then contains
+                    int appCap = (_activeFilter == "App") ? 18 : 10;
+                    // Prioritize prefix matches first, then contains/word matches (Turkish-accent-safe!)
                     for (int pass = 0; pass < 2; pass++)
                     {
-                        for (int i = 0; i < _indexedApps.Count && list.Count < 10; i++)
+                        for (int i = 0; i < _indexedApps.Count && list.Count < appCap; i++)
                         {
                             PinnedAppItem app = _indexedApps[i];
-                            bool hit = string.IsNullOrEmpty(q)
-                                ? (pass == 0)
-                                : (pass == 0 ? app.Name.StartsWith(q, StringComparison.OrdinalIgnoreCase) : app.Name.IndexOf(q, StringComparison.OrdinalIgnoreCase) >= 0);
+                            bool hit;
+                            if (string.IsNullOrEmpty(normQ))
+                                hit = (pass == 0);
+                            else if (pass == 0)
+                                hit = NormalizeSearch(app.Name).StartsWith(normQ, StringComparison.Ordinal);
+                            else
+                                hit = MatchesQuery(app.Name, normQ);
+
                             if (hit && addedNames.Add(app.Name))
                             {
                                 PinnedAppItem cap = app;
+                                bool isUwp = !string.IsNullOrEmpty(cap.Path) && cap.Path.StartsWith("shell:AppsFolder\\", StringComparison.OrdinalIgnoreCase);
                                 list.Add(new SpotlightResult
                                 {
                                     Title = cap.Name,
-                                    Subtitle = L10n.T(_cfg, "Uygulama", "Application"),
+                                    Subtitle = isUwp ? L10n.T(_cfg, "Windows Uygulaması", "Windows App") : L10n.T(_cfg, "Uygulama", "Application"),
                                     Category = "App",
                                     IconPath = cap.IconPath,
-                                    FilePath = cap.Path,
-                                    Glyph = "\uE71D",
+                                    FilePath = isUwp ? null : cap.Path,
+                                    Glyph = string.IsNullOrEmpty(cap.Glyph) ? "\uE71D" : cap.Glyph,
                                     Execute = delegate { LaunchTarget(cap.Path); }
                                 });
                             }
@@ -962,13 +1160,12 @@ namespace Monolith
             // 3. Windows Settings + System Commands
             if (_activeFilter == "All" || _activeFilter == "Setting")
             {
+                int setCap = (_activeFilter == "Setting") ? 24 : 14;
                 List<SpotlightResult> settings = BuildWindowsSettingsCatalog();
-                for (int i = 0; i < settings.Count && list.Count < 14; i++)
+                for (int i = 0; i < settings.Count && list.Count < setCap; i++)
                 {
                     SpotlightResult s = settings[i];
-                    if (string.IsNullOrEmpty(q) ||
-                        s.Title.IndexOf(q, StringComparison.OrdinalIgnoreCase) >= 0 ||
-                        s.Subtitle.IndexOf(q, StringComparison.OrdinalIgnoreCase) >= 0)
+                    if (string.IsNullOrEmpty(normQ) || MatchesQuery(s.Title, normQ) || MatchesQuery(s.Subtitle, normQ))
                     {
                         list.Add(s);
                     }
@@ -978,7 +1175,8 @@ namespace Monolith
             // 4. Async Real PC File Results (Windows Search Index / User Folders)
             if ((_activeFilter == "All" || _activeFilter == "File") && _asyncFileResults.Count > 0)
             {
-                for (int i = 0; i < _asyncFileResults.Count && list.Count < 18; i++)
+                int fileCap = (_activeFilter == "File") ? 20 : 18;
+                for (int i = 0; i < _asyncFileResults.Count && list.Count < fileCap; i++)
                     list.Add(_asyncFileResults[i]);
             }
 
@@ -1013,11 +1211,11 @@ namespace Monolith
             string q = (raw ?? "").Trim();
             int gen = Interlocked.Increment(ref _searchGen);
             _asyncFileResults = new List<SpotlightResult>();
-            if (q.Length < 2) return;
+            if (q.Length < 2 && _activeFilter != "File") return;
 
             ThreadPool.QueueUserWorkItem(delegate
             {
-                Thread.Sleep(110); // debounce keystrokes
+                Thread.Sleep(q.Length == 0 ? 15 : 95); // debounce keystrokes
                 if (gen != _searchGen) return;
 
                 List<SpotlightResult> hits = QueryWindowsSearchFiles(q);
@@ -1030,7 +1228,8 @@ namespace Monolith
                     if (_activeFilter != "App" && _activeFilter != "Setting" && _activeFilter != "Web")
                     {
                         BuildSearchResults(q);
-                        RenderSearchModeResults();
+                        if (_resultsPanel == null) RenderSearchModeLayout();
+                        else RenderSearchModeResults();
                     }
                 }));
             });
@@ -1040,83 +1239,155 @@ namespace Monolith
         {
             List<SpotlightResult> results = new List<SpotlightResult>();
             HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            string normQ = NormalizeSearch(q);
 
-            // 1. Primary: Official Windows Search Index (Search.CollatorDSO)
-            try
+            // 1. Primary: Official Windows Search Index (Search.CollatorDSO) when query >= 2 chars
+            if (q.Length >= 2)
             {
-                string safe = q.Replace("'", "''").Replace("%", "").Replace("_", "");
-                using (OleDbConnection conn = new OleDbConnection("Provider=Search.CollatorDSO;Extended Properties='Application=Windows';"))
+                try
                 {
-                    conn.Open();
-                    using (OleDbCommand cmd = conn.CreateCommand())
+                    string safe = q.Replace("'", "''").Replace("%", "").Replace("_", "");
+                    using (OleDbConnection conn = new OleDbConnection("Provider=Search.CollatorDSO;Extended Properties='Application=Windows';"))
                     {
-                        cmd.CommandText = "SELECT TOP 8 System.ItemName, System.ItemPathDisplay FROM SYSTEMINDEX WHERE System.ItemName LIKE '%" + safe + "%'";
-                        using (OleDbDataReader rdr = cmd.ExecuteReader())
+                        conn.Open();
+                        using (OleDbCommand cmd = conn.CreateCommand())
                         {
-                            while (rdr.Read() && results.Count < 6)
+                            cmd.CommandText = "SELECT TOP 10 System.ItemName, System.ItemPathDisplay FROM SYSTEMINDEX WHERE System.ItemName LIKE '%" + safe + "%'";
+                            using (OleDbDataReader rdr = cmd.ExecuteReader())
                             {
-                                string name = rdr[0] as string;
-                                string path = rdr[1] as string;
-                                if (string.IsNullOrEmpty(name) || string.IsNullOrEmpty(path)) continue;
-                                if (!seen.Add(path)) continue;
-                                string capPath = path;
-                                results.Add(new SpotlightResult
+                                while (rdr.Read() && results.Count < 8)
                                 {
-                                    Title = name,
-                                    Subtitle = Path.GetDirectoryName(path) ?? path,
-                                    Category = "File",
-                                    IconPath = path,
-                                    FilePath = path,
-                                    Glyph = "\uE8A5",
-                                    Execute = delegate { LaunchTarget(capPath); }
-                                });
+                                    string name = rdr[0] as string;
+                                    string path = rdr[1] as string;
+                                    if (string.IsNullOrEmpty(name) || string.IsNullOrEmpty(path)) continue;
+                                    if (!seen.Add(path)) continue;
+                                    string capPath = path;
+                                    results.Add(new SpotlightResult
+                                    {
+                                        Title = name,
+                                        Subtitle = Path.GetDirectoryName(path) ?? path,
+                                        Category = "File",
+                                        IconPath = path,
+                                        FilePath = path,
+                                        Glyph = Directory.Exists(path) ? "\uE8B7" : "\uE8A5",
+                                        Execute = delegate { LaunchTarget(capPath); }
+                                    });
+                                }
                             }
                         }
                     }
                 }
+                catch { }
             }
-            catch { }
 
-            // 2. Fast local user-folder fallback (Desktop / Downloads / Documents) if Search Index unavailable
-            if (results.Count < 4)
+            // 2. Fast local user-folder search (Desktop, Downloads, Documents, OneDrive, Pictures, Videos + 1-level subfolders)
+            if (results.Count < 8)
             {
+                string profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
                 string[] folders = new string[]
                 {
                     Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
-                    Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads"),
-                    Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments)
+                    Path.Combine(profile, "Downloads"),
+                    Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
+                    Path.Combine(profile, @"OneDrive\Desktop"),
+                    Path.Combine(profile, @"OneDrive\Documents"),
+                    Environment.GetFolderPath(Environment.SpecialFolder.MyPictures),
+                    Environment.GetFolderPath(Environment.SpecialFolder.MyVideos),
+                    Environment.GetFolderPath(Environment.SpecialFolder.MyMusic)
                 };
-                for (int d = 0; d < folders.Length && results.Count < 6; d++)
+
+                if (string.IsNullOrEmpty(normQ))
                 {
-                    try
+                    // Show most recently modified user files when clicking the "Files" tab with an empty search box
+                    List<FileSystemInfo> recent = new List<FileSystemInfo>();
+                    for (int d = 0; d < 3; d++)
                     {
-                        if (string.IsNullOrEmpty(folders[d]) || !Directory.Exists(folders[d])) continue;
-                        string[] entries = Directory.GetFileSystemEntries(folders[d]);
-                        for (int i = 0; i < entries.Length && results.Count < 6; i++)
+                        try
                         {
-                            string p = entries[i];
-                            string name = Path.GetFileName(p);
-                            if (name.IndexOf(q, StringComparison.OrdinalIgnoreCase) >= 0 && seen.Add(p))
+                            if (string.IsNullOrEmpty(folders[d]) || !Directory.Exists(folders[d])) continue;
+                            DirectoryInfo di = new DirectoryInfo(folders[d]);
+                            FileSystemInfo[] items = di.GetFileSystemInfos();
+                            for (int i = 0; i < items.Length && i < 60; i++)
                             {
-                                string capPath = p;
-                                results.Add(new SpotlightResult
-                                {
-                                    Title = name,
-                                    Subtitle = Path.GetDirectoryName(p) ?? p,
-                                    Category = "File",
-                                    IconPath = p,
-                                    FilePath = p,
-                                    Glyph = Directory.Exists(p) ? "\uE8B7" : "\uE8A5",
-                                    Execute = delegate { LaunchTarget(capPath); }
-                                });
+                                if ((items[i].Attributes & FileAttributes.Hidden) == 0 &&
+                                    !items[i].Name.Equals("desktop.ini", StringComparison.OrdinalIgnoreCase))
+                                    recent.Add(items[i]);
                             }
                         }
+                        catch { }
                     }
-                    catch { }
+                    recent.Sort(delegate(FileSystemInfo a, FileSystemInfo b) { return b.LastWriteTimeUtc.CompareTo(a.LastWriteTimeUtc); });
+                    for (int i = 0; i < recent.Count && results.Count < 10; i++)
+                    {
+                        string p = recent[i].FullName;
+                        if (seen.Add(p))
+                        {
+                            string capPath = p;
+                            results.Add(new SpotlightResult
+                            {
+                                Title = recent[i].Name,
+                                Subtitle = Path.GetDirectoryName(p) ?? p,
+                                Category = "File",
+                                IconPath = p,
+                                FilePath = p,
+                                Glyph = Directory.Exists(p) ? "\uE8B7" : "\uE8A5",
+                                Execute = delegate { LaunchTarget(capPath); }
+                            });
+                        }
+                    }
+                }
+                else
+                {
+                    for (int d = 0; d < folders.Length && results.Count < 10; d++)
+                    {
+                        ScanLocalFolderMatches(folders[d], normQ, results, seen, 0);
+                    }
                 }
             }
 
             return results;
+        }
+
+        private static void ScanLocalFolderMatches(string dir, string normQ, List<SpotlightResult> results, HashSet<string> seen, int depth)
+        {
+            if (depth > 1 || results.Count >= 10 || string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) return;
+            try
+            {
+                string[] entries = Directory.GetFileSystemEntries(dir);
+                for (int i = 0; i < entries.Length && results.Count < 10; i++)
+                {
+                    string p = entries[i];
+                    string name = Path.GetFileName(p);
+                    if (string.IsNullOrEmpty(name) || name.Equals("desktop.ini", StringComparison.OrdinalIgnoreCase)) continue;
+                    if (MatchesQuery(name, normQ) && seen.Add(p))
+                    {
+                        string capPath = p;
+                        results.Add(new SpotlightResult
+                        {
+                            Title = name,
+                            Subtitle = Path.GetDirectoryName(p) ?? p,
+                            Category = "File",
+                            IconPath = p,
+                            FilePath = p,
+                            Glyph = Directory.Exists(p) ? "\uE8B7" : "\uE8A5",
+                            Execute = delegate { LaunchTarget(capPath); }
+                        });
+                    }
+                }
+                if (depth == 0 && results.Count < 10)
+                {
+                    string[] subDirs = Directory.GetDirectories(dir);
+                    for (int i = 0; i < subDirs.Length && i < 20 && results.Count < 10; i++)
+                    {
+                        string bn = Path.GetFileName(subDirs[i]);
+                        if (string.IsNullOrEmpty(bn) || bn.StartsWith(".", StringComparison.Ordinal) ||
+                            bn.Equals("node_modules", StringComparison.OrdinalIgnoreCase))
+                            continue;
+                        ScanLocalFolderMatches(subDirs[i], normQ, results, seen, 1);
+                    }
+                }
+            }
+            catch { }
         }
 
         private List<SpotlightResult> BuildRecommendedItems()
@@ -1287,8 +1558,13 @@ namespace Monolith
         {
             try
             {
-                if (!string.IsNullOrEmpty(target))
-                    Process.Start(new ProcessStartInfo(target) { UseShellExecute = true });
+                if (string.IsNullOrEmpty(target)) return;
+                if (target.StartsWith("shell:AppsFolder\\", StringComparison.OrdinalIgnoreCase))
+                {
+                    Process.Start(new ProcessStartInfo("explorer.exe", target) { UseShellExecute = true });
+                    return;
+                }
+                Process.Start(new ProcessStartInfo(target) { UseShellExecute = true });
             }
             catch { }
         }
