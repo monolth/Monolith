@@ -30,8 +30,11 @@ namespace Monolith
     }
 
     /// <summary>
-    /// Lightweight zero-dependency Windows 10/11 Wi-Fi manager powered by native wlanapi.dll
-    /// with seamless netsh fallback (handles saved networks, new password connections, disconnect & live scan).
+    /// Driver-safe Windows 10/11 Wi-Fi manager.
+    /// Avoids low-level WlanScan channel sweeps and WlanSetInterface PHY radio ioctls that can
+    /// trigger NDIS list corruption (0x139) on Killer/Intel AX1650i (Netwtw14.sys) drivers
+    /// when connecting while a hardware scan is in flight.
+    /// All queries and connection commands are strictly serialized through a single lock.
     /// </summary>
     internal static class WifiManager
     {
@@ -94,37 +97,82 @@ namespace Monolith
         private static extern uint WlanGetAvailableNetworkList(IntPtr hClientHandle, ref Guid pInterfaceGuid, uint dwFlags, IntPtr pReserved, out IntPtr ppAvailableNetworkList);
 
         [DllImport("wlanapi.dll")]
-        private static extern uint WlanScan(IntPtr hClientHandle, ref Guid pInterfaceGuid, IntPtr pDot11Ssid, IntPtr pIeData, IntPtr pReserved);
-
-        [DllImport("wlanapi.dll")]
-        private static extern uint WlanDisconnect(IntPtr hClientHandle, ref Guid pInterfaceGuid, IntPtr pReserved);
-
-        [DllImport("wlanapi.dll")]
-        private static extern uint WlanQueryInterface(IntPtr hClientHandle, ref Guid pInterfaceGuid, int OpCode, IntPtr pReserved, out uint pdwDataSize, out IntPtr ppData, out int pWlanOpcodeValueType);
-
-        [DllImport("wlanapi.dll")]
-        private static extern uint WlanSetInterface(IntPtr hClientHandle, ref Guid pInterfaceGuid, int OpCode, uint dwDataSize, ref WLAN_PHY_RADIO_STATE pData, IntPtr pReserved);
-
-        [DllImport("wlanapi.dll")]
         private static extern void WlanFreeMemory(IntPtr pMemory);
 
-        [StructLayout(LayoutKind.Sequential)]
-        private struct WLAN_PHY_RADIO_STATE
-        {
-            public uint dwPhyIndex;
-            public int dot11SoftwareRadioState; // 1 = On, 2 = Off
-            public int dot11HardwareRadioState;
-        }
-
+        private static readonly object _wlanLock = new object();
         private static bool _cachedWifiEnabled = true;
+        private static string _lastConnectedProfile = null;
+        private static WifiScanResult _lastScanResult = null;
+        private static DateTime _lastScanUtc = DateTime.MinValue;
 
         public static bool IsWifiEnabled()
         {
+            return _cachedWifiEnabled;
+        }
+
+        public static void SetWifiEnabledAsync(bool enable, Action<bool> onDone)
+        {
+            _cachedWifiEnabled = enable;
+            if (!enable)
+            {
+                DisconnectAsync(onDone);
+            }
+            else
+            {
+                ThreadPool.QueueUserWorkItem(delegate
+                {
+                    bool ok = true;
+                    lock (_wlanLock)
+                    {
+                        try
+                        {
+                            if (!string.IsNullOrEmpty(_lastConnectedProfile))
+                            {
+                                string safe = _lastConnectedProfile.Replace("\"", "");
+                                RunNetsh("wlan connect name=\"" + safe + "\"");
+                                Thread.Sleep(1200);
+                            }
+                            _lastScanUtc = DateTime.MinValue;
+                        }
+                        catch { }
+                    }
+                    if (onDone != null) onDone(ok);
+                });
+            }
+        }
+
+        public static string GetQuickConnectedSsid()
+        {
             try
             {
+                WifiScanResult r = ScanNetworks(false);
+                if (r != null && !string.IsNullOrEmpty(r.ConnectedSsid))
+                    return r.ConnectedSsid;
+            }
+            catch { }
+            return null;
+        }
+
+        public static WifiScanResult ScanNetworks(bool forceRefresh)
+        {
+            lock (_wlanLock)
+            {
+                // Return cached scan if queried within 2.5 seconds to prevent back-to-back driver queries
+                if (!forceRefresh && _lastScanResult != null && (DateTime.UtcNow - _lastScanUtc).TotalMilliseconds < 2500)
+                {
+                    return _lastScanResult;
+                }
+
+                WifiScanResult result = new WifiScanResult();
+                Dictionary<string, WifiNetworkInfo> bySsid = new Dictionary<string, WifiNetworkInfo>(StringComparer.OrdinalIgnoreCase);
+
+                // Read cached OS network list passively (NEVER call WlanScan hardware sweep before/during connect!)
                 uint ver;
-                IntPtr hClient;
-                if (WlanOpenHandle(2, IntPtr.Zero, out ver, out hClient) == 0 && hClient != IntPtr.Zero)
+                IntPtr hClient = IntPtr.Zero;
+                uint openRc = 1;
+                try { openRc = WlanOpenHandle(2, IntPtr.Zero, out ver, out hClient); } catch { openRc = 1; }
+
+                if (openRc == 0 && hClient != IntPtr.Zero)
                 {
                     try
                     {
@@ -134,238 +182,120 @@ namespace Monolith
                             try
                             {
                                 int ifCount = Marshal.ReadInt32(pIfList, 0);
-                                if (ifCount == 0) return _cachedWifiEnabled;
                                 int ifSize = Marshal.SizeOf(typeof(WLAN_INTERFACE_INFO));
+                                if (ifCount > 0) result.HasWifiAdapter = true;
+
                                 for (int i = 0; i < ifCount; i++)
                                 {
                                     IntPtr pIf = new IntPtr(pIfList.ToInt64() + 8 + i * ifSize);
                                     WLAN_INTERFACE_INFO info = (WLAN_INTERFACE_INFO)Marshal.PtrToStructure(pIf, typeof(WLAN_INTERFACE_INFO));
-                                    uint dataSize;
-                                    IntPtr pData;
-                                    int valType;
-                                    // wlan_intf_opcode_radio_state = 5
-                                    if (WlanQueryInterface(hClient, ref info.InterfaceGuid, 5, IntPtr.Zero, out dataSize, out pData, out valType) == 0 && pData != IntPtr.Zero)
+                                    if (string.IsNullOrEmpty(result.InterfaceName))
+                                        result.InterfaceName = info.strInterfaceDescription;
+
+                                    IntPtr pNetList;
+                                    uint listRc = WlanGetAvailableNetworkList(hClient, ref info.InterfaceGuid, 0, IntPtr.Zero, out pNetList);
+                                    if (listRc == 5)
+                                    {
+                                        result.AccessBlockedByLocation = true;
+                                    }
+                                    else if (listRc == 0 && pNetList != IntPtr.Zero)
                                     {
                                         try
                                         {
-                                            int phyCount = Marshal.ReadInt32(pData, 0);
-                                            if (phyCount > 0)
+                                            int netCount = Marshal.ReadInt32(pNetList, 0);
+                                            int netSize = Marshal.SizeOf(typeof(WLAN_AVAILABLE_NETWORK));
+                                            for (int n = 0; n < netCount; n++)
                                             {
-                                                int swState = Marshal.ReadInt32(pData, 8);
-                                                int hwState = Marshal.ReadInt32(pData, 12);
-                                                _cachedWifiEnabled = (swState != 2 && hwState != 2);
-                                                return _cachedWifiEnabled;
-                                            }
-                                        }
-                                        finally { WlanFreeMemory(pData); }
-                                    }
-                                }
-                            }
-                            finally { WlanFreeMemory(pIfList); }
-                        }
-                    }
-                    finally { WlanCloseHandle(hClient, IntPtr.Zero); }
-                }
-            }
-            catch { }
-            return _cachedWifiEnabled;
-        }
+                                                IntPtr pNet = new IntPtr(pNetList.ToInt64() + 8 + n * netSize);
+                                                WLAN_AVAILABLE_NETWORK net = (WLAN_AVAILABLE_NETWORK)Marshal.PtrToStructure(pNet, typeof(WLAN_AVAILABLE_NETWORK));
+                                                if (net.dot11Ssid.uSSIDLength == 0 || net.dot11Ssid.ucSSID == null) continue;
+                                                int len = (int)Math.Min(32, net.dot11Ssid.uSSIDLength);
+                                                string ssid = Encoding.UTF8.GetString(net.dot11Ssid.ucSSID, 0, len).Trim('\0');
+                                                if (string.IsNullOrEmpty(ssid)) continue;
 
-        public static void SetWifiEnabledAsync(bool enable, Action<bool> onDone)
-        {
-            _cachedWifiEnabled = enable;
-            ThreadPool.QueueUserWorkItem(delegate
-            {
-                bool ok = false;
-                try
-                {
-                    uint ver;
-                    IntPtr hClient;
-                    if (WlanOpenHandle(2, IntPtr.Zero, out ver, out hClient) == 0 && hClient != IntPtr.Zero)
-                    {
-                        try
-                        {
-                            IntPtr pIfList;
-                            if (WlanEnumInterfaces(hClient, IntPtr.Zero, out pIfList) == 0 && pIfList != IntPtr.Zero)
-                            {
-                                try
-                                {
-                                    int ifCount = Marshal.ReadInt32(pIfList, 0);
-                                    int ifSize = Marshal.SizeOf(typeof(WLAN_INTERFACE_INFO));
-                                    for (int i = 0; i < ifCount; i++)
-                                    {
-                                        IntPtr pIf = new IntPtr(pIfList.ToInt64() + 8 + i * ifSize);
-                                        WLAN_INTERFACE_INFO info = (WLAN_INTERFACE_INFO)Marshal.PtrToStructure(pIf, typeof(WLAN_INTERFACE_INFO));
-                                        WLAN_PHY_RADIO_STATE state = new WLAN_PHY_RADIO_STATE();
-                                        state.dwPhyIndex = 0;
-                                        state.dot11SoftwareRadioState = enable ? 1 : 2;
-                                        state.dot11HardwareRadioState = enable ? 1 : 2;
-                                        uint rc = WlanSetInterface(hClient, ref info.InterfaceGuid, 5, (uint)Marshal.SizeOf(typeof(WLAN_PHY_RADIO_STATE)), ref state, IntPtr.Zero);
-                                        if (rc == 0) ok = true;
-                                        else if (!enable)
-                                        {
-                                            WlanDisconnect(hClient, ref info.InterfaceGuid, IntPtr.Zero);
-                                        }
-                                    }
-                                }
-                                finally { WlanFreeMemory(pIfList); }
-                            }
-                        }
-                        finally { WlanCloseHandle(hClient, IntPtr.Zero); }
-                    }
-                    if (!ok && !enable)
-                    {
-                        RunNetsh("wlan disconnect");
-                        ok = true;
-                    }
-                }
-                catch { }
-                if (onDone != null) onDone(ok);
-            });
-        }
+                                                bool connected = (net.dwFlags & WLAN_AVAILABLE_NETWORK_CONNECTED) != 0;
+                                                bool saved = (net.dwFlags & WLAN_AVAILABLE_NETWORK_HAS_PROFILE) != 0 || !string.IsNullOrEmpty(net.strProfileName);
+                                                int sig = (int)Math.Min(100, net.wlanSignalQuality);
+                                                string authLbl = !net.bSecurityEnabled || net.dot11DefaultAuthAlgorithm == DOT11_AUTH_ALGO_80211_OPEN
+                                                    ? "Open"
+                                                    : (net.dot11DefaultAuthAlgorithm == DOT11_AUTH_ALGO_WPA3 || net.dot11DefaultAuthAlgorithm == DOT11_AUTH_ALGO_WPA3_SAE
+                                                        ? "WPA3"
+                                                        : (net.dot11DefaultAuthAlgorithm == DOT11_AUTH_ALGO_RSNA_PSK ? "WPA2" : "Secured"));
 
-        public static string GetQuickConnectedSsid()
-        {
-            try
-            {
-                WifiScanResult r = ScanNetworks(false);
-                if (!string.IsNullOrEmpty(r.ConnectedSsid)) return r.ConnectedSsid;
-            }
-            catch { }
-            return null;
-        }
-
-        public static WifiScanResult ScanNetworks(bool triggerActiveScan)
-        {
-            WifiScanResult result = new WifiScanResult();
-            Dictionary<string, WifiNetworkInfo> bySsid = new Dictionary<string, WifiNetworkInfo>(StringComparer.OrdinalIgnoreCase);
-
-            uint ver;
-            IntPtr hClient = IntPtr.Zero;
-            uint openRc = 1;
-            try { openRc = WlanOpenHandle(2, IntPtr.Zero, out ver, out hClient); } catch { openRc = 1; }
-
-            if (openRc == 0 && hClient != IntPtr.Zero)
-            {
-                try
-                {
-                    IntPtr pIfList;
-                    if (WlanEnumInterfaces(hClient, IntPtr.Zero, out pIfList) == 0 && pIfList != IntPtr.Zero)
-                    {
-                        try
-                        {
-                            int ifCount = Marshal.ReadInt32(pIfList, 0);
-                            int ifSize = Marshal.SizeOf(typeof(WLAN_INTERFACE_INFO));
-                            if (ifCount > 0) result.HasWifiAdapter = true;
-
-                            for (int i = 0; i < ifCount; i++)
-                            {
-                                IntPtr pIf = new IntPtr(pIfList.ToInt64() + 8 + i * ifSize);
-                                WLAN_INTERFACE_INFO info = (WLAN_INTERFACE_INFO)Marshal.PtrToStructure(pIf, typeof(WLAN_INTERFACE_INFO));
-                                if (string.IsNullOrEmpty(result.InterfaceName))
-                                    result.InterfaceName = info.strInterfaceDescription;
-
-                                if (triggerActiveScan)
-                                {
-                                    try { WlanScan(hClient, ref info.InterfaceGuid, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero); } catch { }
-                                }
-
-                                IntPtr pNetList;
-                                uint listRc = WlanGetAvailableNetworkList(hClient, ref info.InterfaceGuid, 0, IntPtr.Zero, out pNetList);
-                                if (listRc == 5)
-                                {
-                                    result.AccessBlockedByLocation = true;
-                                }
-                                else if (listRc == 0 && pNetList != IntPtr.Zero)
-                                {
-                                    try
-                                    {
-                                        int netCount = Marshal.ReadInt32(pNetList, 0);
-                                        int netSize = Marshal.SizeOf(typeof(WLAN_AVAILABLE_NETWORK));
-                                        for (int n = 0; n < netCount; n++)
-                                        {
-                                            IntPtr pNet = new IntPtr(pNetList.ToInt64() + 8 + n * netSize);
-                                            WLAN_AVAILABLE_NETWORK net = (WLAN_AVAILABLE_NETWORK)Marshal.PtrToStructure(pNet, typeof(WLAN_AVAILABLE_NETWORK));
-                                            if (net.dot11Ssid.uSSIDLength == 0 || net.dot11Ssid.ucSSID == null) continue;
-                                            int len = (int)Math.Min(32, net.dot11Ssid.uSSIDLength);
-                                            string ssid = Encoding.UTF8.GetString(net.dot11Ssid.ucSSID, 0, len).Trim('\0');
-                                            if (string.IsNullOrEmpty(ssid)) continue;
-
-                                            bool connected = (net.dwFlags & WLAN_AVAILABLE_NETWORK_CONNECTED) != 0;
-                                            bool saved = (net.dwFlags & WLAN_AVAILABLE_NETWORK_HAS_PROFILE) != 0 || !string.IsNullOrEmpty(net.strProfileName);
-                                            int sig = (int)Math.Min(100, net.wlanSignalQuality);
-                                            string authLbl = !net.bSecurityEnabled || net.dot11DefaultAuthAlgorithm == DOT11_AUTH_ALGO_80211_OPEN
-                                                ? "Open"
-                                                : (net.dot11DefaultAuthAlgorithm == DOT11_AUTH_ALGO_WPA3 || net.dot11DefaultAuthAlgorithm == DOT11_AUTH_ALGO_WPA3_SAE
-                                                    ? "WPA3"
-                                                    : (net.dot11DefaultAuthAlgorithm == DOT11_AUTH_ALGO_RSNA_PSK ? "WPA2" : "Secured"));
-
-                                            WifiNetworkInfo existing;
-                                            if (bySsid.TryGetValue(ssid, out existing))
-                                            {
-                                                if (connected) existing.IsConnected = true;
-                                                if (saved)
+                                                WifiNetworkInfo existing;
+                                                if (bySsid.TryGetValue(ssid, out existing))
                                                 {
-                                                    existing.HasProfile = true;
-                                                    if (!string.IsNullOrEmpty(net.strProfileName))
-                                                        existing.ProfileName = net.strProfileName;
+                                                    if (connected) existing.IsConnected = true;
+                                                    if (saved)
+                                                    {
+                                                        existing.HasProfile = true;
+                                                        if (!string.IsNullOrEmpty(net.strProfileName))
+                                                            existing.ProfileName = net.strProfileName;
+                                                    }
+                                                    if (sig > existing.SignalQuality) existing.SignalQuality = sig;
                                                 }
-                                                if (sig > existing.SignalQuality) existing.SignalQuality = sig;
-                                            }
-                                            else
-                                            {
-                                                WifiNetworkInfo item = new WifiNetworkInfo
+                                                else
                                                 {
-                                                    Ssid = ssid,
-                                                    ProfileName = !string.IsNullOrEmpty(net.strProfileName) ? net.strProfileName : ssid,
-                                                    SignalQuality = sig,
-                                                    IsConnected = connected,
-                                                    HasProfile = saved,
-                                                    IsSecured = net.bSecurityEnabled,
-                                                    AuthLabel = authLbl
-                                                };
-                                                bySsid[ssid] = item;
-                                            }
+                                                    WifiNetworkInfo item = new WifiNetworkInfo
+                                                    {
+                                                        Ssid = ssid,
+                                                        ProfileName = !string.IsNullOrEmpty(net.strProfileName) ? net.strProfileName : ssid,
+                                                        SignalQuality = sig,
+                                                        IsConnected = connected,
+                                                        HasProfile = saved,
+                                                        IsSecured = net.bSecurityEnabled,
+                                                        AuthLabel = authLbl
+                                                    };
+                                                    bySsid[ssid] = item;
+                                                }
 
-                                            if (connected) result.ConnectedSsid = ssid;
+                                                if (connected) result.ConnectedSsid = ssid;
+                                            }
                                         }
-                                    }
-                                    finally
-                                    {
-                                        WlanFreeMemory(pNetList);
+                                        finally
+                                        {
+                                            WlanFreeMemory(pNetList);
+                                        }
                                     }
                                 }
                             }
-                        }
-                        finally
-                        {
-                            WlanFreeMemory(pIfList);
+                            finally
+                            {
+                                WlanFreeMemory(pIfList);
+                            }
                         }
                     }
+                    finally
+                    {
+                        WlanCloseHandle(hClient, IntPtr.Zero);
+                    }
                 }
-                finally
+
+                // Always merge saved profiles & active interface state via netsh so saved networks are always available
+                if (bySsid.Count == 0)
                 {
-                    WlanCloseHandle(hClient, IntPtr.Zero);
+                    MergeNetshSavedFallback(result, bySsid);
                 }
-            }
 
-            // Fallback: if Win11 24H2 Location permission blocked nearby scan, still list active + saved profiles via netsh!
-            if (bySsid.Count == 0)
-            {
-                MergeNetshSavedFallback(result, bySsid);
+                List<WifiNetworkInfo> list = new List<WifiNetworkInfo>(bySsid.Values);
+                list.Sort(delegate(WifiNetworkInfo a, WifiNetworkInfo b)
+                {
+                    if (a.IsConnected != b.IsConnected) return a.IsConnected ? -1 : 1;
+                    if (a.HasProfile != b.HasProfile) return a.HasProfile ? -1 : 1;
+                    int cmpSig = b.SignalQuality.CompareTo(a.SignalQuality);
+                    if (cmpSig != 0) return cmpSig;
+                    return string.Compare(a.Ssid, b.Ssid, StringComparison.OrdinalIgnoreCase);
+                });
+                result.Networks = list;
+                if (!string.IsNullOrEmpty(result.ConnectedSsid))
+                {
+                    _lastConnectedProfile = result.ConnectedSsid;
+                    _cachedWifiEnabled = true;
+                }
+                _lastScanResult = result;
+                _lastScanUtc = DateTime.UtcNow;
+                return result;
             }
-
-            List<WifiNetworkInfo> list = new List<WifiNetworkInfo>(bySsid.Values);
-            list.Sort(delegate(WifiNetworkInfo a, WifiNetworkInfo b)
-            {
-                if (a.IsConnected != b.IsConnected) return a.IsConnected ? -1 : 1;
-                if (a.HasProfile != b.HasProfile) return a.HasProfile ? -1 : 1;
-                int cmpSig = b.SignalQuality.CompareTo(a.SignalQuality);
-                if (cmpSig != 0) return cmpSig;
-                return string.Compare(a.Ssid, b.Ssid, StringComparison.OrdinalIgnoreCase);
-            });
-            result.Networks = list;
-            return result;
         }
 
         private static void MergeNetshSavedFallback(WifiScanResult result, Dictionary<string, WifiNetworkInfo> bySsid)
@@ -389,6 +319,11 @@ namespace Monolith
                         {
                             connectedSsid = v;
                             result.HasWifiAdapter = true;
+                        }
+                        else if ((k.IndexOf("Description", StringComparison.OrdinalIgnoreCase) >= 0 || k.IndexOf("Açıklama", StringComparison.OrdinalIgnoreCase) >= 0) && !string.IsNullOrEmpty(v))
+                        {
+                            result.HasWifiAdapter = true;
+                            if (string.IsNullOrEmpty(result.InterfaceName)) result.InterfaceName = v;
                         }
                         else if ((k.IndexOf("Signal", StringComparison.OrdinalIgnoreCase) >= 0 || k.IndexOf("Sinyal", StringComparison.OrdinalIgnoreCase) >= 0) && v.EndsWith("%"))
                         {
@@ -433,7 +368,7 @@ namespace Monolith
                                 {
                                     Ssid = pName,
                                     ProfileName = pName,
-                                    SignalQuality = 55,
+                                    SignalQuality = 60,
                                     IsConnected = false,
                                     HasProfile = true,
                                     IsSecured = true,
@@ -453,24 +388,25 @@ namespace Monolith
             {
                 bool ok = false;
                 string msg = "";
-                try
+                lock (_wlanLock)
                 {
-                    string p = string.IsNullOrEmpty(profileName) ? ssid : profileName;
-                    string outText = RunNetsh("wlan connect name=\"" + p.Replace("\"", "") + "\" ssid=\"" + ssid.Replace("\"", "") + "\"");
-                    ok = !string.IsNullOrEmpty(outText) &&
-                         (outText.IndexOf("successfully", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                          outText.IndexOf("başarıyla", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                          outText.IndexOf("tamamlandı", StringComparison.OrdinalIgnoreCase) >= 0);
-                    if (!ok)
+                    try
                     {
-                        // Wait briefly and check if actually connected
-                        Thread.Sleep(900);
-                        string cur = GetQuickConnectedSsid();
-                        ok = string.Equals(cur, ssid, StringComparison.OrdinalIgnoreCase);
+                        string p = string.IsNullOrEmpty(profileName) ? ssid : profileName;
+                        string outText = RunNetsh("wlan connect name=\"" + p.Replace("\"", "") + "\" ssid=\"" + ssid.Replace("\"", "") + "\"");
+                        ok = !string.IsNullOrEmpty(outText) &&
+                             (outText.IndexOf("successfully", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                              outText.IndexOf("başarıyla", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                              outText.IndexOf("tamamlandı", StringComparison.OrdinalIgnoreCase) >= 0);
+                        // Give driver 1.5s to complete 802.11 handshake before any status query
+                        Thread.Sleep(1500);
+                        _lastScanUtc = DateTime.MinValue;
+                        _cachedWifiEnabled = true;
+                        _lastConnectedProfile = p;
+                        msg = ok ? "OK" : outText;
                     }
-                    msg = ok ? "OK" : outText;
+                    catch (Exception ex) { msg = ex.Message; }
                 }
-                catch (Exception ex) { msg = ex.Message; }
                 if (onDone != null) onDone(ok, msg);
             });
         }
@@ -482,53 +418,59 @@ namespace Monolith
                 bool ok = false;
                 string msg = "";
                 string tmpXml = Path.Combine(Path.GetTempPath(), "monolith_wlan_" + Guid.NewGuid().ToString("N") + ".xml");
-                try
+                lock (_wlanLock)
                 {
-                    string safeSsidXml = SecurityElement.Escape(ssid);
-                    string hexSsid = BytesToHex(Encoding.UTF8.GetBytes(ssid));
-                    string xml;
-                    if (isOpen || string.IsNullOrEmpty(password))
+                    try
                     {
-                        xml = "<?xml version=\"1.0\"?>\r\n" +
-                              "<WLANProfile xmlns=\"http://www.microsoft.com/networking/WLAN/profile/v1\">\r\n" +
-                              "  <name>" + safeSsidXml + "</name>\r\n" +
-                              "  <SSIDConfig><SSID><hex>" + hexSsid + "</hex><name>" + safeSsidXml + "</name></SSID></SSIDConfig>\r\n" +
-                              "  <connectionType>ESS</connectionType>\r\n" +
-                              "  <connectionMode>auto</connectionMode>\r\n" +
-                              "  <MSM><security><authEncryption><authentication>open</authentication><encryption>none</encryption><useOneX>false</useOneX></authEncryption></security></MSM>\r\n" +
-                              "</WLANProfile>";
-                    }
-                    else
-                    {
-                        string safeKeyXml = SecurityElement.Escape(password);
-                        xml = "<?xml version=\"1.0\"?>\r\n" +
-                              "<WLANProfile xmlns=\"http://www.microsoft.com/networking/WLAN/profile/v1\">\r\n" +
-                              "  <name>" + safeSsidXml + "</name>\r\n" +
-                              "  <SSIDConfig><SSID><hex>" + hexSsid + "</hex><name>" + safeSsidXml + "</name></SSID></SSIDConfig>\r\n" +
-                              "  <connectionType>ESS</connectionType>\r\n" +
-                              "  <connectionMode>auto</connectionMode>\r\n" +
-                              "  <MSM><security>\r\n" +
-                              "    <authEncryption><authentication>WPA2PSK</authentication><encryption>AES</encryption><useOneX>false</useOneX></authEncryption>\r\n" +
-                              "    <sharedKey><keyType>passPhrase</keyType><protected>false</protected><keyMaterial>" + safeKeyXml + "</keyMaterial></sharedKey>\r\n" +
-                              "  </security></MSM>\r\n" +
-                              "</WLANProfile>";
-                    }
+                        string safeSsidXml = SecurityElement.Escape(ssid);
+                        string hexSsid = BytesToHex(Encoding.UTF8.GetBytes(ssid));
+                        string xml;
+                        if (isOpen || string.IsNullOrEmpty(password))
+                        {
+                            xml = "<?xml version=\"1.0\"?>\r\n" +
+                                  "<WLANProfile xmlns=\"http://www.microsoft.com/networking/WLAN/profile/v1\">\r\n" +
+                                  "  <name>" + safeSsidXml + "</name>\r\n" +
+                                  "  <SSIDConfig><SSID><hex>" + hexSsid + "</hex><name>" + safeSsidXml + "</name></SSID></SSIDConfig>\r\n" +
+                                  "  <connectionType>ESS</connectionType>\r\n" +
+                                  "  <connectionMode>auto</connectionMode>\r\n" +
+                                  "  <MSM><security><authEncryption><authentication>open</authentication><encryption>none</encryption><useOneX>false</useOneX></authEncryption></security></MSM>\r\n" +
+                                  "</WLANProfile>";
+                        }
+                        else
+                        {
+                            string safeKeyXml = SecurityElement.Escape(password);
+                            xml = "<?xml version=\"1.0\"?>\r\n" +
+                                  "<WLANProfile xmlns=\"http://www.microsoft.com/networking/WLAN/profile/v1\">\r\n" +
+                                  "  <name>" + safeSsidXml + "</name>\r\n" +
+                                  "  <SSIDConfig><SSID><hex>" + hexSsid + "</hex><name>" + safeSsidXml + "</name></SSID></SSIDConfig>\r\n" +
+                                  "  <connectionType>ESS</connectionType>\r\n" +
+                                  "  <connectionMode>auto</connectionMode>\r\n" +
+                                  "  <MSM><security>\r\n" +
+                                  "    <authEncryption><authentication>WPA2PSK</authentication><encryption>AES</encryption><useOneX>false</useOneX></authEncryption>\r\n" +
+                                  "    <sharedKey><keyType>passPhrase</keyType><protected>false</protected><keyMaterial>" + safeKeyXml + "</keyMaterial></sharedKey>\r\n" +
+                                  "  </security></MSM>\r\n" +
+                                  "</WLANProfile>";
+                        }
 
-                    File.WriteAllText(tmpXml, xml, Encoding.UTF8);
-                    RunNetsh("wlan add profile filename=\"" + tmpXml + "\" user=current");
-                    string connOut = RunNetsh("wlan connect name=\"" + ssid.Replace("\"", "") + "\" ssid=\"" + ssid.Replace("\"", "") + "\"");
-                    Thread.Sleep(1100);
-                    string cur = GetQuickConnectedSsid();
-                    ok = string.Equals(cur, ssid, StringComparison.OrdinalIgnoreCase) ||
-                         (!string.IsNullOrEmpty(connOut) &&
-                          (connOut.IndexOf("successfully", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                           connOut.IndexOf("başarıyla", StringComparison.OrdinalIgnoreCase) >= 0));
-                    msg = ok ? "OK" : connOut;
-                }
-                catch (Exception ex) { msg = ex.Message; }
-                finally
-                {
-                    try { if (File.Exists(tmpXml)) File.Delete(tmpXml); } catch { }
+                        File.WriteAllText(tmpXml, xml, Encoding.UTF8);
+                        RunNetsh("wlan add profile filename=\"" + tmpXml + "\" user=current");
+                        string connOut = RunNetsh("wlan connect name=\"" + ssid.Replace("\"", "") + "\" ssid=\"" + ssid.Replace("\"", "") + "\"");
+                        // Wait 1.6s so driver completes association cleanly before any query
+                        Thread.Sleep(1600);
+                        _lastScanUtc = DateTime.MinValue;
+                        _cachedWifiEnabled = true;
+                        _lastConnectedProfile = ssid;
+                        ok = !string.IsNullOrEmpty(connOut) &&
+                             (connOut.IndexOf("successfully", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                              connOut.IndexOf("başarıyla", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                              connOut.IndexOf("tamamlandı", StringComparison.OrdinalIgnoreCase) >= 0);
+                        msg = ok ? "OK" : connOut;
+                    }
+                    catch (Exception ex) { msg = ex.Message; }
+                    finally
+                    {
+                        try { if (File.Exists(tmpXml)) File.Delete(tmpXml); } catch { }
+                    }
                 }
                 if (onDone != null) onDone(ok, msg);
             });
@@ -539,41 +481,18 @@ namespace Monolith
             ThreadPool.QueueUserWorkItem(delegate
             {
                 bool ok = false;
-                try
+                lock (_wlanLock)
                 {
-                    uint ver;
-                    IntPtr hClient;
-                    if (WlanOpenHandle(2, IntPtr.Zero, out ver, out hClient) == 0 && hClient != IntPtr.Zero)
+                    try
                     {
-                        try
-                        {
-                            IntPtr pIfList;
-                            if (WlanEnumInterfaces(hClient, IntPtr.Zero, out pIfList) == 0 && pIfList != IntPtr.Zero)
-                            {
-                                try
-                                {
-                                    int ifCount = Marshal.ReadInt32(pIfList, 0);
-                                    int ifSize = Marshal.SizeOf(typeof(WLAN_INTERFACE_INFO));
-                                    for (int i = 0; i < ifCount; i++)
-                                    {
-                                        IntPtr pIf = new IntPtr(pIfList.ToInt64() + 8 + i * ifSize);
-                                        WLAN_INTERFACE_INFO info = (WLAN_INTERFACE_INFO)Marshal.PtrToStructure(pIf, typeof(WLAN_INTERFACE_INFO));
-                                        if (WlanDisconnect(hClient, ref info.InterfaceGuid, IntPtr.Zero) == 0)
-                                            ok = true;
-                                    }
-                                }
-                                finally { WlanFreeMemory(pIfList); }
-                            }
-                        }
-                        finally { WlanCloseHandle(hClient, IntPtr.Zero); }
-                    }
-                    if (!ok)
-                    {
+                        // Use user-mode netsh wlan disconnect instead of raw WlanDisconnect handle calls
                         RunNetsh("wlan disconnect");
+                        Thread.Sleep(600);
+                        _lastScanUtc = DateTime.MinValue;
                         ok = true;
                     }
+                    catch { }
                 }
-                catch { }
                 if (onDone != null) onDone(ok);
             });
         }

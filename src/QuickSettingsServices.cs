@@ -375,24 +375,11 @@ namespace Monolith
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern bool CloseHandle(IntPtr hObject);
 
+        private static readonly object _btLock = new object();
         private static bool _cachedBtEnabled = true;
 
         public static bool IsBluetoothEnabled()
         {
-            try
-            {
-                BLUETOOTH_FIND_RADIO_PARAMS rp = new BLUETOOTH_FIND_RADIO_PARAMS { dwSize = (uint)Marshal.SizeOf(typeof(BLUETOOTH_FIND_RADIO_PARAMS)) };
-                IntPtr hRadio;
-                IntPtr hFind = BluetoothFindFirstRadio(ref rp, out hRadio);
-                if (hFind != IntPtr.Zero)
-                {
-                    CloseHandle(hRadio);
-                    BluetoothFindRadioClose(hFind);
-                    _cachedBtEnabled = true;
-                    return true;
-                }
-            }
-            catch { }
             return _cachedBtEnabled;
         }
 
@@ -401,34 +388,38 @@ namespace Monolith
             _cachedBtEnabled = enable;
             ThreadPool.QueueUserWorkItem(delegate
             {
-                bool ok = false;
-                try
+                bool ok = true;
+                lock (_btLock)
                 {
-                    BLUETOOTH_FIND_RADIO_PARAMS rp = new BLUETOOTH_FIND_RADIO_PARAMS { dwSize = (uint)Marshal.SizeOf(typeof(BLUETOOTH_FIND_RADIO_PARAMS)) };
-                    IntPtr hRadio;
-                    IntPtr hFind = BluetoothFindFirstRadio(ref rp, out hRadio);
-                    if (hFind != IntPtr.Zero)
+                    try
                     {
-                        try
+                        BLUETOOTH_FIND_RADIO_PARAMS rp = new BLUETOOTH_FIND_RADIO_PARAMS { dwSize = (uint)Marshal.SizeOf(typeof(BLUETOOTH_FIND_RADIO_PARAMS)) };
+                        IntPtr hRadio;
+                        IntPtr hFind = BluetoothFindFirstRadio(ref rp, out hRadio);
+                        if (hFind != IntPtr.Zero)
                         {
-                            BluetoothEnableIncomingConnections(hRadio, enable);
-                            BluetoothEnableDiscovery(hRadio, enable);
-                            ok = true;
-                        }
-                        finally
-                        {
-                            CloseHandle(hRadio);
-                            BluetoothFindRadioClose(hFind);
+                            try
+                            {
+                                BluetoothEnableIncomingConnections(hRadio, enable);
+                                BluetoothEnableDiscovery(hRadio, enable);
+                            }
+                            finally
+                            {
+                                CloseHandle(hRadio);
+                                BluetoothFindRadioClose(hFind);
+                            }
                         }
                     }
+                    catch { }
                 }
-                catch { }
                 if (onDone != null) onDone(ok);
             });
         }
 
         public static BluetoothScanResult GetPairedDevices()
         {
+            lock (_btLock)
+            {
             BluetoothScanResult res = new BluetoothScanResult();
             res.RadioEnabled = _cachedBtEnabled;
             Dictionary<string, BluetoothDeviceItem> byName = new Dictionary<string, BluetoothDeviceItem>(StringComparer.OrdinalIgnoreCase);
@@ -591,6 +582,7 @@ namespace Monolith
             });
             res.Devices = list;
             return res;
+            }
         }
 
         public static void ToggleDeviceConnectionAsync(BluetoothDeviceItem item, Action<bool, bool> onDone)

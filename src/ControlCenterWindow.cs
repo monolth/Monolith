@@ -1391,11 +1391,6 @@ namespace Monolith
             System.Threading.ThreadPool.QueueUserWorkItem(delegate
             {
                 WifiScanResult res = WifiManager.ScanNetworks(triggerScan);
-                if (triggerScan && res != null && res.HasWifiAdapter && res.Networks.Count == 0)
-                {
-                    System.Threading.Thread.Sleep(650);
-                    res = WifiManager.ScanNetworks(false);
-                }
                 Dispatcher.BeginInvoke(new Action(delegate
                 {
                     _wifiScan = res;
