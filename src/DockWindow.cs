@@ -295,7 +295,9 @@ namespace Monolith
         private bool _editMode = false;
         private bool _userHidden = false;
         private bool _fullscreenHidden = false;
+        private bool _gameDeepSleep = false;
         private bool _searchHostHidden = false;
+        private readonly Dictionary<IntPtr, ImageSource> _openWinIconCache = new Dictionary<IntPtr, ImageSource>();
         private bool _smartOverlapActive = false;
         private bool _autoHidePeeking = true;
         private int _autoHideCooldown = 0;
@@ -319,6 +321,7 @@ namespace Monolith
         private readonly WindowPreviewPopup _livePreview;
         private PopoverWindow _activePopover;
         private ControlCenterWindow _controlCenterWin;
+        private DateTime _controlCenterClosedUtc = DateTime.MinValue;
         private SpotlightWindow _spotlightWin;
         private DateTime _spotlightClosedUtc = DateTime.MinValue;
         private WidgetPickerWindow _pickerWin;
@@ -329,6 +332,7 @@ namespace Monolith
         public DockWindow()
         {
             _cfg = ConfigStore.Load();
+            NativeWin32.AntiCheatSafeMode = _cfg.AntiCheatSafeMode;
             _tel = new SystemTelemetry(_cfg);
             _tel.ToastRequested += delegate(string title, string msg)
             {
@@ -339,7 +343,6 @@ namespace Monolith
             _livePreview = new WindowPreviewPopup(
                 delegate(IntPtr h) { ToggleFocusWindow(h); },
                 delegate(IntPtr h) { CloseWindowFast(h); });
-            SpotlightWindow.PrewarmIndexAsync();
 
             Title = "Monolith";
             WindowStyle = WindowStyle.None;
@@ -376,11 +379,11 @@ namespace Monolith
             _fastTimer.Tick += OnFastTick;
             _fastTimer.Start();
 
-            _windowPollTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(320) };
+            _windowPollTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(_cfg.LowResourceMode ? 1200 : 650) };
             _windowPollTimer.Tick += delegate { RefreshOpenWindowsIfChanged(); };
             _windowPollTimer.Start();
 
-            _hoverPollTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
+            _hoverPollTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(_cfg.LowResourceMode ? 220 : 140) };
             _hoverPollTimer.Tick += OnAutoHidePoll;
             _hoverPollTimer.Start();
 
@@ -400,6 +403,15 @@ namespace Monolith
                 PositionDock();
                 UpdateBackdrop(true);
                 ShowToast("Monolith", L10n.T(_cfg, "Sağ tıkla: Tüm Widget'lar veya Ayarlar  \u2022  Ctrl+Shift+W", "Right-click for All Widgets or Settings  \u2022  Ctrl+Shift+W"));
+
+                // Defer Search app indexing & initial RAM working-set trim so boot launch is instant (<150ms)!
+                System.Threading.ThreadPool.QueueUserWorkItem(delegate
+                {
+                    System.Threading.Thread.Sleep(3500);
+                    SpotlightWindow.PrewarmIndexAsync();
+                    System.Threading.Thread.Sleep(3500);
+                    NativeWin32.TrimWorkingSet();
+                });
             };
 
             Closing += delegate
@@ -534,6 +546,12 @@ namespace Monolith
 
         public void RebuildDockItems()
         {
+            NativeWin32.AntiCheatSafeMode = _cfg.AntiCheatSafeMode;
+            if (_windowPollTimer != null)
+                _windowPollTimer.Interval = TimeSpan.FromMilliseconds(_cfg.LowResourceMode ? 1200 : 650);
+            if (_hoverPollTimer != null)
+                _hoverPollTimer.Interval = TimeSpan.FromMilliseconds(_cfg.LowResourceMode ? 220 : 140);
+
             _palette = ThemeManager.GetPalette(_cfg);
             _metrics = ThemeManager.GetMetrics(_cfg.DockSize);
 
@@ -1237,7 +1255,12 @@ namespace Monolith
                 Border tile = CreateIconTileShell(sz);
 
                 Grid g = new Grid();
-                ImageSource ico = NativeWin32.ExtractIconFromWindow(w.Handle, w.ExePath);
+                ImageSource ico;
+                if (!_openWinIconCache.TryGetValue(w.Handle, out ico))
+                {
+                    ico = NativeWin32.ExtractIconFromWindow(w.Handle, w.ExePath);
+                    if (ico != null) _openWinIconCache[w.Handle] = ico;
+                }
                 if (ico != null)
                 {
                     Image img = new Image
@@ -1288,7 +1311,8 @@ namespace Monolith
                     IconStyleFactory.ApplyVisualState(tile, _palette, true, isFg);
                     if (!_cfg.DockMagnification)
                         AnimateTileTransform(tile, 1.12, 0, 120);
-                    if (_cfg.LiveWindowPreviews)
+                    bool skipDwmForGame = _cfg.AntiCheatSafeMode && NativeWin32.IsProtectedGameOrAntiCheatProcess(captured.ProcessName);
+                    if (_cfg.LiveWindowPreviews && !skipDwmForGame)
                     {
                         _tooltip.HideTip();
                         _livePreview.ShowPreview(captured.Handle, captured.Title, capIcon, tile, this, _cfg.IsTop, _palette);
@@ -1411,25 +1435,20 @@ namespace Monolith
                 NativeWin32.GetWindowThreadProcessId(hWnd, out pid);
                 if (pid == ownPid) return true;
 
-                string pName = "";
+                string pName = NativeWin32.GetCachedProcessName(pid);
                 string exePath = "";
                 string aumid = null;
-                try
-                {
-                    using (Process pr = Process.GetProcessById((int)pid))
-                    {
-                        pName = pr.ProcessName;
-                        try { exePath = pr.MainModule.FileName; } catch { }
-                    }
-                }
-                catch { }
+                bool isProtected = _cfg.AntiCheatSafeMode && NativeWin32.IsProtectedGameOrAntiCheatProcess(pName);
 
-                string resolvedExe;
-                aumid = NativeWin32.TryGetWindowAppUserModelId(hWnd, out resolvedExe);
-                if (!string.IsNullOrEmpty(resolvedExe))
-                    exePath = resolvedExe;
-                else if (string.IsNullOrEmpty(exePath))
-                    exePath = NativeWin32.TryGetProcessExePath(pid);
+                if (!isProtected)
+                {
+                    string resolvedExe;
+                    aumid = NativeWin32.TryGetWindowAppUserModelId(hWnd, out resolvedExe);
+                    if (!string.IsNullOrEmpty(resolvedExe))
+                        exePath = resolvedExe;
+                    else
+                        exePath = NativeWin32.TryGetProcessExePath(pid);
+                }
 
                 list.Add(new OpenWindowInfo
                 {
@@ -1555,8 +1574,32 @@ namespace Monolith
         // ====== TIMER UPDATES ======
         private void OnFastTick(object sender, EventArgs e)
         {
+            // Fullscreen & Anti-Cheat Game Deep-Sleep check FIRST (zero overhead when gaming!)
+            if (_cfg.HideOnFullscreen || _cfg.AntiCheatSafeMode)
+                CheckFullscreen();
+            else if (_fullscreenHidden || _gameDeepSleep)
+            {
+                _fullscreenHidden = false;
+                _gameDeepSleep = false;
+                ApplyVisibility();
+            }
+
+            // In Fullscreen / Anti-Cheat Game Deep-Sleep: skip ALL telemetry, widget updates & process scans!
+            if (_gameDeepSleep || _fullscreenHidden)
+                return;
+
             _tel.UpdateFastMetrics(_cfg);
-            _tel.PollClipboardSta();
+            if (_cfg.ActiveWidgets != null && _cfg.ActiveWidgets.Contains("clipboard"))
+                _tel.PollClipboardSta();
+
+            // Prune closed windows from open-window icon cache
+            if (_openWinIconCache.Count > 24)
+            {
+                List<IntPtr> dead = new List<IntPtr>();
+                foreach (IntPtr h in _openWinIconCache.Keys)
+                    if (!NativeWin32.IsWindow(h)) dead.Add(h);
+                for (int i = 0; i < dead.Count; i++) _openWinIconCache.Remove(dead[i]);
+            }
 
             // Remember last non-Monolith foreground window for 1-click Window Snapping
             try
@@ -1583,18 +1626,6 @@ namespace Monolith
                     _widgetHandles[i].RefreshAction();
             }
 
-            // Refresh open windows via fast helper
-            RefreshOpenWindowsIfChanged();
-
-            // Fullscreen check
-            if (_cfg.HideOnFullscreen)
-                CheckFullscreen();
-            else if (_fullscreenHidden)
-            {
-                _fullscreenHidden = false;
-                ApplyVisibility();
-            }
-
             // Keep native taskbar hidden if user selected it (zero work-area bouncing!)
             if (_cfg.HideWindowsTaskbar && !_exiting && !_trayFlyoutActive && !_tempNativeTaskbarShown)
             {
@@ -1604,6 +1635,9 @@ namespace Monolith
 
         private void OnAutoHidePoll(object sender, EventArgs e)
         {
+            if (_gameDeepSleep || _fullscreenHidden)
+                return;
+
             // Keep legacy Shell_TrayWnd 100% invisible (alpha=0) AND keep the Hidden Icons flyout
             // anchored directly above/below Monolith's own '^' button while open.
             if (_trayFlyoutActive)
@@ -1709,14 +1743,8 @@ namespace Monolith
                 int ex = NativeWin32.GetWindowLong(fg, NativeWin32.GWL_EXSTYLE);
                 if ((ex & NativeWin32.WS_EX_TOOLWINDOW) != 0) return false;
 
-                try
-                {
-                    using (Process pr = Process.GetProcessById((int)pid))
-                    {
-                        if (IsCaptureOrShellOverlayProcess(pr.ProcessName)) return false;
-                    }
-                }
-                catch { }
+                string fgProc = NativeWin32.GetCachedProcessName(pid);
+                if (IsCaptureOrShellOverlayProcess(fgProc)) return false;
 
                 NativeWin32.RECT rc;
                 if (!NativeWin32.GetWindowRect(fg, out rc)) return false;
@@ -1762,12 +1790,14 @@ namespace Monolith
         private void CheckFullscreen()
         {
             bool fs = false;
+            bool protectedGameActive = false;
             try
             {
                 int quns = 0;
                 if (NativeWin32.SHQueryUserNotificationState(out quns) == 0 && quns == NativeWin32.QUNS_RUNNING_D3D_FULL_SCREEN)
                 {
                     fs = true;
+                    protectedGameActive = true;
                 }
                 else
                 {
@@ -1782,38 +1812,35 @@ namespace Monolith
 
                             if (!isToolOverlay)
                             {
-                                string pName = "";
-                                try
-                                {
-                                    uint pid;
-                                    NativeWin32.GetWindowThreadProcessId(fg, out pid);
-                                    if (pid != 0)
-                                    {
-                                        using (Process pr = Process.GetProcessById((int)pid))
-                                            pName = pr.ProcessName;
-                                    }
-                                }
-                                catch { }
+                                uint pid;
+                                NativeWin32.GetWindowThreadProcessId(fg, out pid);
+                                string pName = NativeWin32.GetCachedProcessName(pid);
 
                                 if (!IsCaptureOrShellOverlayProcess(pName))
                                 {
-                                    // Normal maximized windows (Chrome, VS Code, Explorer, etc.) have WS_CAPTION + (WS_THICKFRAME or IsZoomed);
-                                    // true fullscreen games & F11/YouTube fullscreen strip window borders & caption!
-                                    int style = NativeWin32.GetWindowLong(fg, NativeWin32.GWL_STYLE);
-                                    bool hasCaption = (style & NativeWin32.WS_CAPTION) == NativeWin32.WS_CAPTION;
-                                    bool hasThickFrame = (style & NativeWin32.WS_THICKFRAME) != 0;
-                                    bool isNormalMaximized = hasCaption && (hasThickFrame || NativeWin32.IsZoomed(fg));
+                                    bool isProtectedGame = _cfg.AntiCheatSafeMode && NativeWin32.IsProtectedGameOrAntiCheatProcess(pName);
+                                    NativeWin32.RECT rc;
+                                    bool hasRect = NativeWin32.GetWindowRect(fg, out rc);
+                                    int sw = NativeWin32.GetSystemMetrics(0);
+                                    int sh = NativeWin32.GetSystemMetrics(1);
+                                    bool coversScreen = hasRect && rc.Left <= 0 && rc.Top <= 0 && rc.Right >= sw && rc.Bottom >= sh;
 
-                                    if (!isNormalMaximized)
+                                    if (isProtectedGame && (coversScreen || (hasRect && (rc.Right - rc.Left) >= sw * 0.9 && (rc.Bottom - rc.Top) >= sh * 0.9)))
                                     {
-                                        NativeWin32.RECT rc;
-                                        if (NativeWin32.GetWindowRect(fg, out rc))
-                                        {
-                                            int sw = NativeWin32.GetSystemMetrics(0);
-                                            int sh = NativeWin32.GetSystemMetrics(1);
-                                            if (rc.Left <= 0 && rc.Top <= 0 && rc.Right >= sw && rc.Bottom >= sh)
-                                                fs = true;
-                                        }
+                                        fs = true;
+                                        protectedGameActive = true;
+                                    }
+                                    else if (_cfg.HideOnFullscreen)
+                                    {
+                                        // Normal maximized windows (Chrome, VS Code, Explorer, etc.) have WS_CAPTION + (WS_THICKFRAME or IsZoomed);
+                                        // true fullscreen games & F11/YouTube fullscreen strip window borders & caption!
+                                        int style = NativeWin32.GetWindowLong(fg, NativeWin32.GWL_STYLE);
+                                        bool hasCaption = (style & NativeWin32.WS_CAPTION) == NativeWin32.WS_CAPTION;
+                                        bool hasThickFrame = (style & NativeWin32.WS_THICKFRAME) != 0;
+                                        bool isNormalMaximized = hasCaption && (hasThickFrame || NativeWin32.IsZoomed(fg));
+
+                                        if (!isNormalMaximized && coversScreen)
+                                            fs = true;
                                     }
                                 }
                             }
@@ -1823,9 +1850,11 @@ namespace Monolith
             }
             catch { }
 
-            if (fs != _fullscreenHidden)
+            bool newSleep = _cfg.AntiCheatSafeMode && (fs || protectedGameActive);
+            if (fs != _fullscreenHidden || newSleep != _gameDeepSleep)
             {
                 _fullscreenHidden = fs;
+                _gameDeepSleep = newSleep;
                 ApplyVisibility();
             }
         }
@@ -1839,10 +1868,7 @@ namespace Monolith
                 uint pid;
                 NativeWin32.GetWindowThreadProcessId(fg, out pid);
                 if (pid == 0) return false;
-                using (Process pr = Process.GetProcessById((int)pid))
-                {
-                    return string.Equals(pr.ProcessName, "SearchHost", StringComparison.OrdinalIgnoreCase);
-                }
+                return string.Equals(NativeWin32.GetCachedProcessName(pid), "SearchHost", StringComparison.OrdinalIgnoreCase);
             }
             catch { return false; }
         }
@@ -1850,10 +1876,26 @@ namespace Monolith
         private void ApplyVisibility()
         {
             bool needPeek = _cfg.AutoHide || _smartOverlapActive;
-            bool shouldShow = !_userHidden && !_fullscreenHidden && !_searchHostHidden && (!needPeek || _autoHidePeeking);
+            bool shouldShow = !_userHidden && !_fullscreenHidden && !_gameDeepSleep && !_searchHostHidden && (!needPeek || _autoHidePeeking);
             Visibility = shouldShow ? Visibility.Visible : Visibility.Hidden;
+
+            // Anti-Cheat Game Deep-Sleep: drop Topmost & pause window polling completely while gaming!
+            bool dropTopmost = _gameDeepSleep || _fullscreenHidden;
+            if (Topmost == dropTopmost)
+                Topmost = !dropTopmost;
+
+            if (_windowPollTimer != null)
+            {
+                if (dropTopmost && _windowPollTimer.IsEnabled) _windowPollTimer.Stop();
+                else if (!dropTopmost && !_windowPollTimer.IsEnabled) _windowPollTimer.Start();
+            }
+
             if (_mediaBackdrop != null) _mediaBackdrop.SetPaused(!shouldShow);
-            if (!shouldShow) _tooltip.HideTip();
+            if (!shouldShow)
+            {
+                _tooltip.HideTip();
+                _livePreview.HideImmediate();
+            }
         }
 
         // ====== POSITIONING & OPTICAL GLASS BACKDROP ======
@@ -1877,6 +1919,13 @@ namespace Monolith
         {
             try
             {
+                if ((_cfg.DockMediaMode != "None" && !string.IsNullOrEmpty(_cfg.DockMediaMode)) || !_palette.UsesRefraction)
+                {
+                    _backdropBorder.Background = ThemeManager.Brush(_palette.DockTint);
+                    LiquidGlassRenderer.ReleaseWallpaperCache();
+                    return;
+                }
+
                 PresentationSource src = PresentationSource.FromVisual(this);
                 double dpiX = src != null && src.CompositionTarget != null ? src.CompositionTarget.TransformToDevice.M11 : 1.0;
                 double dpiY = src != null && src.CompositionTarget != null ? src.CompositionTarget.TransformToDevice.M22 : 1.0;
@@ -1967,12 +2016,20 @@ namespace Monolith
                 _controlCenterWin = null;
                 return;
             }
+            if ((DateTime.UtcNow - _controlCenterClosedUtc).TotalMilliseconds < 240)
+                return;
+
+            _tel.RefreshOnDemandForControlCenter();
             _controlCenterWin = new ControlCenterWindow(anchor ?? _backdropBorder, this, _cfg, _palette, _tel, delegate
             {
                 for (int i = 0; i < _widgetHandles.Count; i++)
                     if (_widgetHandles[i].RefreshAction != null) _widgetHandles[i].RefreshAction();
             }, OpenSettings);
-            _controlCenterWin.Closed += delegate { _controlCenterWin = null; };
+            _controlCenterWin.Closed += delegate
+            {
+                _controlCenterWin = null;
+                _controlCenterClosedUtc = DateTime.UtcNow;
+            };
             _controlCenterWin.Show();
             _controlCenterWin.Activate();
         }

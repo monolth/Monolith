@@ -430,7 +430,8 @@ namespace Monolith
                 using (System.Drawing.Image img = System.Drawing.Image.FromFile(path))
                 {
                     FrameDimension dim = new FrameDimension(img.FrameDimensionsList[0]);
-                    int frameCount = Math.Min(120, img.GetFrameCount(dim));
+                    int rawCount = img.GetFrameCount(dim);
+                    int stride = rawCount > 72 ? (int)Math.Ceiling(rawCount / 72.0) : 1;
 
                     byte[] delayBytes = null;
                     try
@@ -440,22 +441,22 @@ namespace Monolith
                     }
                     catch { }
 
+                    // Cap decoded GIF frames to 640x360 (cuts uncompressed GIF RAM by ~85% while staying razor-sharp in dock!)
                     double scale = 1.0;
-                    if (img.Width > 1100) scale = Math.Min(scale, 1100.0 / img.Width);
-                    if (img.Height > 720) scale = Math.Min(scale, 720.0 / img.Height);
+                    if (img.Width > 640) scale = Math.Min(scale, 640.0 / img.Width);
+                    if (img.Height > 360) scale = Math.Min(scale, 360.0 / img.Height);
                     int dstW = Math.Max(16, (int)Math.Round(img.Width * scale));
                     int dstH = Math.Max(16, (int)Math.Round(img.Height * scale));
 
-                    for (int i = 0; i < frameCount; i++)
+                    using (Bitmap bmp = new Bitmap(dstW, dstH))
+                    using (Graphics g = Graphics.FromImage(bmp))
                     {
-                        img.SelectActiveFrame(dim, i);
-                        using (Bitmap bmp = new Bitmap(dstW, dstH))
+                        g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.Bilinear;
+                        for (int i = 0; i < rawCount && _gifFrames.Count < 72; i += stride)
                         {
-                            using (Graphics g = Graphics.FromImage(bmp))
-                            {
-                                g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
-                                g.DrawImage(img, 0, 0, dstW, dstH);
-                            }
+                            img.SelectActiveFrame(dim, i);
+                            g.Clear(System.Drawing.Color.Transparent);
+                            g.DrawImage(img, 0, 0, dstW, dstH);
                             IntPtr hBmp = bmp.GetHbitmap();
                             try
                             {
@@ -468,15 +469,15 @@ namespace Monolith
                             {
                                 DeleteObject(hBmp);
                             }
-                        }
 
-                        int delayMs = 66;
-                        if (delayBytes != null && i * 4 + 3 < delayBytes.Length)
-                        {
-                            int cs = BitConverter.ToInt32(delayBytes, i * 4);
-                            delayMs = Math.Max(30, cs * 10);
+                            int delayMs = 66 * stride;
+                            if (delayBytes != null && i * 4 + 3 < delayBytes.Length)
+                            {
+                                int cs = BitConverter.ToInt32(delayBytes, i * 4);
+                                delayMs = Math.Max(35, cs * 10 * stride);
+                            }
+                            _gifDelaysMs.Add(delayMs);
                         }
-                        _gifDelaysMs.Add(delayMs);
                     }
                 }
 

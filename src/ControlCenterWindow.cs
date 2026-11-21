@@ -55,6 +55,12 @@ namespace Monolith
 
         private Border _shell;
         private bool _editMode = false;
+        private bool _wifiViewOpen = false;
+        private bool _wifiLoading = false;
+        private WifiScanResult _wifiScan = null;
+        private string _expandedWifiSsid = null;
+        private string _wifiStatusMsg = null;
+        private string _connectedSsidPreview = null;
         private bool _suppressDeactivate = false;
 
         public ControlCenterWindow(
@@ -94,6 +100,20 @@ namespace Monolith
 
             RebuildUI();
 
+            // Fetch active Wi-Fi SSID name & live media asynchronously so Control Center opens in <5ms
+            System.Threading.ThreadPool.QueueUserWorkItem(delegate
+            {
+                string ssid = WifiManager.GetQuickConnectedSsid();
+                if (!string.IsNullOrEmpty(ssid))
+                {
+                    Dispatcher.BeginInvoke(new Action(delegate
+                    {
+                        _connectedSsidPreview = ssid;
+                        if (!_wifiViewOpen && IsLoaded) RebuildUI();
+                    }));
+                }
+            });
+
             Deactivated += delegate
             {
                 if (!_suppressDeactivate)
@@ -105,7 +125,8 @@ namespace Monolith
             {
                 if (e.Key == Key.Escape)
                 {
-                    if (_editMode) { _editMode = false; RebuildUI(); }
+                    if (_wifiViewOpen) { _wifiViewOpen = false; _expandedWifiSsid = null; _wifiStatusMsg = null; RebuildUI(); }
+                    else if (_editMode) { _editMode = false; RebuildUI(); }
                     else Close();
                 }
             };
@@ -174,6 +195,14 @@ namespace Monolith
             _shell.Padding = compact ? new Thickness(12, 11, 12, 10) : new Thickness(14, 14, 14, 11);
 
             StackPanel root = new StackPanel();
+
+            // Inline Windows 11 Wi-Fi Sub-View when user clicks the Wi-Fi tile!
+            if (_wifiViewOpen)
+            {
+                BuildWifiSubView(root, tileR, compact);
+                _shell.Child = root;
+                return;
+            }
 
             // 1. Quick Action Tiles Grid (Windows 11 3-col or 2-col customizable grid)
             int cols = _cfg.CcColumns;
@@ -401,6 +430,11 @@ namespace Monolith
 
             string title = L10n.T(_cfg, def.NameTr, def.NameEn);
             string sub = L10n.T(_cfg, def.SubTr, def.SubEn);
+            if (def.Id == "wifi" && !string.IsNullOrEmpty(_connectedSsidPreview))
+            {
+                sub = _connectedSsidPreview;
+                if (!glassCards) title = _connectedSsidPreview;
+            }
 
             Grid host = new Grid { Margin = new Thickness(padH, padT, padR, 3.5) };
 
@@ -467,15 +501,33 @@ namespace Monolith
                     BorderThickness = new Thickness(1),
                     Cursor = Cursors.Hand
                 };
-                pill.Child = new TextBlock
+                StackPanel pillRow = new StackPanel
+                {
+                    Orientation = Orientation.Horizontal,
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    VerticalAlignment = VerticalAlignment.Center
+                };
+                pillRow.Children.Add(new TextBlock
                 {
                     Text = def.Glyph,
                     FontFamily = new FontFamily("Segoe MDL2 Assets"),
                     FontSize = compact ? 14 : 15.5,
                     Foreground = def.AccentDefault ? Brushes.White : ThemeManager.Brush(_palette.TextPrimary),
-                    HorizontalAlignment = HorizontalAlignment.Center,
                     VerticalAlignment = VerticalAlignment.Center
-                };
+                });
+                if (def.Id == "wifi")
+                {
+                    pillRow.Children.Add(new TextBlock
+                    {
+                        Text = "\uE76C",
+                        FontFamily = new FontFamily("Segoe MDL2 Assets"),
+                        FontSize = 9,
+                        Foreground = def.AccentDefault ? ThemeManager.Brush(Color.FromArgb(205, 255, 255, 255)) : ThemeManager.Brush(_palette.TextMuted),
+                        VerticalAlignment = VerticalAlignment.Center,
+                        Margin = new Thickness(7, 0, 0, 0)
+                    });
+                }
+                pill.Child = pillRow;
                 pill.MouseEnter += delegate { pill.Opacity = 0.86; };
                 pill.MouseLeave += delegate { pill.Opacity = 1.0; };
                 if (!_editMode)
@@ -890,9 +942,447 @@ namespace Monolith
             g.Children.Add(b);
         }
 
+        private void OpenWifiSubView(bool triggerScan)
+        {
+            _editMode = false;
+            _wifiViewOpen = true;
+            _wifiLoading = true;
+            _wifiStatusMsg = null;
+            RebuildUI();
+
+            System.Threading.ThreadPool.QueueUserWorkItem(delegate
+            {
+                WifiScanResult res = WifiManager.ScanNetworks(triggerScan);
+                if (triggerScan && res != null && res.HasWifiAdapter && res.Networks.Count == 0)
+                {
+                    System.Threading.Thread.Sleep(650);
+                    res = WifiManager.ScanNetworks(false);
+                }
+                Dispatcher.BeginInvoke(new Action(delegate
+                {
+                    _wifiScan = res;
+                    _wifiLoading = false;
+                    if (res != null && !string.IsNullOrEmpty(res.ConnectedSsid))
+                        _connectedSsidPreview = res.ConnectedSsid;
+                    if (_wifiViewOpen) RebuildUI();
+                }));
+            });
+        }
+
+        private static string GetWifiSignalGlyph(int sig)
+        {
+            if (sig >= 75) return "\uE701";
+            if (sig >= 50) return "\uE874";
+            if (sig >= 25) return "\uE873";
+            return "\uE872";
+        }
+
+        private void BuildWifiSubView(StackPanel root, double tileR, bool compact)
+        {
+            // Header: Back <- | Wi-Fi | Refresh
+            DockPanel hdr = new DockPanel { Margin = new Thickness(0, 0, 0, 10) };
+
+            Border backBtn = MakeFooterIconBtn("\uE72B", false, L10n.T(_cfg, "Geri", "Back"), delegate
+            {
+                _wifiViewOpen = false;
+                _expandedWifiSsid = null;
+                _wifiStatusMsg = null;
+                RebuildUI();
+            });
+            backBtn.Margin = new Thickness(0, 0, 8, 0);
+            DockPanel.SetDock(backBtn, Dock.Left);
+            hdr.Children.Add(backBtn);
+
+            Border refreshBtn = MakeFooterIconBtn("\uE72C", false, L10n.T(_cfg, "Ağları Yenile", "Refresh Networks"), delegate
+            {
+                OpenWifiSubView(true);
+            });
+            DockPanel.SetDock(refreshBtn, Dock.Right);
+            hdr.Children.Add(refreshBtn);
+
+            hdr.Children.Add(new TextBlock
+            {
+                Text = "Wi-Fi",
+                FontFamily = new FontFamily("Segoe UI"),
+                FontSize = 14.5,
+                FontWeight = FontWeights.Bold,
+                Foreground = ThemeManager.Brush(_palette.TextPrimary),
+                VerticalAlignment = VerticalAlignment.Center
+            });
+            root.Children.Add(hdr);
+
+            if (!string.IsNullOrEmpty(_wifiStatusMsg))
+            {
+                Border banner = new Border
+                {
+                    CornerRadius = new CornerRadius(9),
+                    Background = ThemeManager.Brush(Color.FromArgb(40, _palette.Accent.R, _palette.Accent.G, _palette.Accent.B)),
+                    BorderBrush = ThemeManager.Brush(_palette.Accent),
+                    BorderThickness = new Thickness(1),
+                    Padding = new Thickness(10, 6, 10, 6),
+                    Margin = new Thickness(0, 0, 0, 8)
+                };
+                banner.Child = new TextBlock
+                {
+                    Text = _wifiStatusMsg,
+                    FontFamily = new FontFamily("Segoe UI"),
+                    FontSize = 11.2,
+                    Foreground = ThemeManager.Brush(_palette.TextPrimary),
+                    TextWrapping = TextWrapping.Wrap
+                };
+                root.Children.Add(banner);
+            }
+
+            if (_wifiLoading)
+            {
+                root.Children.Add(new TextBlock
+                {
+                    Text = L10n.T(_cfg, "Wi-Fi ağları taranıyor...", "Scanning Wi-Fi networks..."),
+                    FontFamily = new FontFamily("Segoe UI"),
+                    FontSize = 12,
+                    Foreground = ThemeManager.Brush(_palette.TextMuted),
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    Margin = new Thickness(0, 26, 0, 26)
+                });
+            }
+            else if (_wifiScan == null || !_wifiScan.HasWifiAdapter)
+            {
+                StackPanel emptySp = new StackPanel { Margin = new Thickness(8, 18, 8, 18), HorizontalAlignment = HorizontalAlignment.Center };
+                emptySp.Children.Add(new TextBlock
+                {
+                    Text = "\uE839",
+                    FontFamily = new FontFamily("Segoe MDL2 Assets"),
+                    FontSize = 24,
+                    Foreground = ThemeManager.Brush(_palette.TextMuted),
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    Margin = new Thickness(0, 0, 0, 8)
+                });
+                emptySp.Children.Add(new TextBlock
+                {
+                    Text = L10n.T(_cfg, "Wi-Fi bağdaştırıcısı bulunamadı (Kablolu bağlantı aktif olabilir).", "No Wi-Fi adapter detected (Ethernet may be active)."),
+                    FontFamily = new FontFamily("Segoe UI"),
+                    FontSize = 11.5,
+                    Foreground = ThemeManager.Brush(_palette.TextSecondary),
+                    TextWrapping = TextWrapping.Wrap,
+                    TextAlignment = TextAlignment.Center
+                });
+                root.Children.Add(emptySp);
+            }
+            else
+            {
+                ScrollViewer sv = new ScrollViewer
+                {
+                    MaxHeight = 295,
+                    VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                    HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                    Margin = new Thickness(0, 0, 0, 8)
+                };
+                StackPanel listSp = new StackPanel();
+
+                if (_wifiScan.Networks.Count == 0)
+                {
+                    listSp.Children.Add(new TextBlock
+                    {
+                        Text = _wifiScan.AccessBlockedByLocation
+                            ? L10n.T(_cfg, "Windows 11 konum izni kapalı olduğu için yakındaki ağlar gizlendi. Aşağıdan konum/Wi-Fi ayarlarını açabilirsiniz.", "Windows 11 Location permission is off, hiding nearby Wi-Fi networks.")
+                            : L10n.T(_cfg, "Yakında Wi-Fi ağı bulunamadı.", "No Wi-Fi networks found nearby."),
+                        FontFamily = new FontFamily("Segoe UI"),
+                        FontSize = 11.5,
+                        Foreground = ThemeManager.Brush(_palette.TextMuted),
+                        TextWrapping = TextWrapping.Wrap,
+                        Margin = new Thickness(6, 14, 6, 14)
+                    });
+                }
+
+                for (int i = 0; i < _wifiScan.Networks.Count; i++)
+                {
+                    WifiNetworkInfo net = _wifiScan.Networks[i];
+                    bool expanded = net.IsConnected || string.Equals(_expandedWifiSsid, net.Ssid, StringComparison.OrdinalIgnoreCase);
+
+                    Border rowCard = new Border
+                    {
+                        CornerRadius = new CornerRadius(tileR),
+                        Background = net.IsConnected
+                            ? ThemeManager.Brush(Color.FromArgb(46, _palette.Accent.R, _palette.Accent.G, _palette.Accent.B))
+                            : ThemeManager.Brush(_palette.ModalSurface),
+                        BorderBrush = net.IsConnected
+                            ? ThemeManager.Brush(_palette.Accent)
+                            : ThemeManager.Brush(_palette.ModalBorder),
+                        BorderThickness = new Thickness(1),
+                        Padding = new Thickness(10, 8, 10, 8),
+                        Margin = new Thickness(0, 0, 0, 6),
+                        Cursor = Cursors.Hand
+                    };
+
+                    StackPanel cardBody = new StackPanel();
+
+                    DockPanel topLine = new DockPanel { VerticalAlignment = VerticalAlignment.Center };
+                    StackPanel iconWrap = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 10, 0) };
+                    iconWrap.Children.Add(new TextBlock
+                    {
+                        Text = GetWifiSignalGlyph(net.SignalQuality),
+                        FontFamily = new FontFamily("Segoe MDL2 Assets"),
+                        FontSize = 15,
+                        Foreground = net.IsConnected ? ThemeManager.Brush(_palette.Accent) : ThemeManager.Brush(_palette.TextPrimary),
+                        VerticalAlignment = VerticalAlignment.Center
+                    });
+                    if (net.IsSecured)
+                    {
+                        iconWrap.Children.Add(new TextBlock
+                        {
+                            Text = "\uE72E",
+                            FontFamily = new FontFamily("Segoe MDL2 Assets"),
+                            FontSize = 8.5,
+                            Foreground = ThemeManager.Brush(_palette.TextMuted),
+                            VerticalAlignment = VerticalAlignment.Bottom,
+                            Margin = new Thickness(-4, 0, 0, -2)
+                        });
+                    }
+                    DockPanel.SetDock(iconWrap, Dock.Left);
+                    topLine.Children.Add(iconWrap);
+
+                    TextBlock sigPct = new TextBlock
+                    {
+                        Text = net.SignalQuality + "%",
+                        FontFamily = new FontFamily("Segoe UI"),
+                        FontSize = 10.2,
+                        Foreground = ThemeManager.Brush(_palette.TextMuted),
+                        VerticalAlignment = VerticalAlignment.Center
+                    };
+                    DockPanel.SetDock(sigPct, Dock.Right);
+                    topLine.Children.Add(sigPct);
+
+                    StackPanel nameCol = new StackPanel { VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 8, 0) };
+                    nameCol.Children.Add(new TextBlock
+                    {
+                        Text = net.Ssid,
+                        FontFamily = new FontFamily("Segoe UI"),
+                        FontSize = 12.2,
+                        FontWeight = net.IsConnected ? FontWeights.Bold : FontWeights.SemiBold,
+                        Foreground = ThemeManager.Brush(_palette.TextPrimary),
+                        TextTrimming = TextTrimming.CharacterEllipsis
+                    });
+
+                    string statusText;
+                    if (net.IsConnected)
+                        statusText = L10n.T(_cfg, "Bağlı", "Connected") + (net.IsSecured ? (" • " + L10n.T(_cfg, "Güvenli", "Secured")) : "");
+                    else if (net.HasProfile)
+                        statusText = L10n.T(_cfg, "Kayıtlı", "Saved") + (net.IsSecured ? (" • " + net.AuthLabel) : "");
+                    else
+                        statusText = net.IsSecured ? (L10n.T(_cfg, "Güvenli", "Secured") + " • " + net.AuthLabel) : L10n.T(_cfg, "Açık ağ", "Open network");
+
+                    nameCol.Children.Add(new TextBlock
+                    {
+                        Text = statusText,
+                        FontFamily = new FontFamily("Segoe UI"),
+                        FontSize = 10.2,
+                        Foreground = net.IsConnected ? ThemeManager.Brush(_palette.Accent) : ThemeManager.Brush(_palette.TextMuted),
+                        TextTrimming = TextTrimming.CharacterEllipsis
+                    });
+                    topLine.Children.Add(nameCol);
+                    cardBody.Children.Add(topLine);
+
+                    if (expanded)
+                    {
+                        StackPanel actionArea = new StackPanel { Margin = new Thickness(0, 8, 0, 0) };
+                        WifiNetworkInfo capNet = net;
+
+                        if (net.IsConnected)
+                        {
+                            Border discBtn = MakeWifiActionButton(L10n.T(_cfg, "Bağlantıyı Kes", "Disconnect"), false, delegate
+                            {
+                                _wifiStatusMsg = L10n.T(_cfg, "Bağlantı kesiliyor...", "Disconnecting...");
+                                RebuildUI();
+                                WifiManager.DisconnectAsync(delegate
+                                {
+                                    Dispatcher.BeginInvoke(new Action(delegate
+                                    {
+                                        _connectedSsidPreview = null;
+                                        OpenWifiSubView(false);
+                                    }));
+                                });
+                            });
+                            actionArea.Children.Add(discBtn);
+                        }
+                        else if (net.HasProfile || !net.IsSecured)
+                        {
+                            Border connBtn = MakeWifiActionButton(L10n.T(_cfg, "Bağlan", "Connect"), true, delegate
+                            {
+                                _wifiStatusMsg = L10n.T(_cfg, "Bağlanılıyor: ", "Connecting: ") + capNet.Ssid + "...";
+                                RebuildUI();
+                                if (capNet.HasProfile)
+                                {
+                                    WifiManager.ConnectSavedAsync(capNet.Ssid, capNet.ProfileName, delegate(bool ok, string msg)
+                                    {
+                                        Dispatcher.BeginInvoke(new Action(delegate
+                                        {
+                                            _wifiStatusMsg = ok
+                                                ? (L10n.T(_cfg, "Bağlandı: ", "Connected: ") + capNet.Ssid)
+                                                : L10n.T(_cfg, "Bağlantı kurulamadı. Tekrar deneyin.", "Could not connect. Try again.");
+                                            if (ok) _connectedSsidPreview = capNet.Ssid;
+                                            OpenWifiSubView(false);
+                                        }));
+                                    });
+                                }
+                                else
+                                {
+                                    WifiManager.ConnectWithPasswordAsync(capNet.Ssid, "", true, delegate(bool ok, string msg)
+                                    {
+                                        Dispatcher.BeginInvoke(new Action(delegate
+                                        {
+                                            _wifiStatusMsg = ok
+                                                ? (L10n.T(_cfg, "Bağlandı: ", "Connected: ") + capNet.Ssid)
+                                                : L10n.T(_cfg, "Bağlantı kurulamadı.", "Could not connect.");
+                                            if (ok) _connectedSsidPreview = capNet.Ssid;
+                                            OpenWifiSubView(false);
+                                        }));
+                                    });
+                                }
+                            });
+                            actionArea.Children.Add(connBtn);
+                        }
+                        else
+                        {
+                            // New secured network -> inline password box + Connect button right inside Control Center!
+                            actionArea.Children.Add(new TextBlock
+                            {
+                                Text = L10n.T(_cfg, "Ağ güvenlik anahtarını (şifre) girin:", "Enter network security key:"),
+                                FontFamily = new FontFamily("Segoe UI"),
+                                FontSize = 10.2,
+                                Foreground = ThemeManager.Brush(_palette.TextSecondary),
+                                Margin = new Thickness(0, 0, 0, 4)
+                            });
+                            PasswordBox pwdBox = new PasswordBox
+                            {
+                                FontFamily = new FontFamily("Segoe UI"),
+                                FontSize = 12,
+                                Padding = new Thickness(8, 5, 8, 5),
+                                Background = ThemeManager.Brush(_palette.ModalBg),
+                                Foreground = ThemeManager.Brush(_palette.TextPrimary),
+                                BorderBrush = ThemeManager.Brush(_palette.Accent),
+                                BorderThickness = new Thickness(1),
+                                Margin = new Thickness(0, 0, 0, 7)
+                            };
+                            Action submitPwd = delegate
+                            {
+                                string pwd = pwdBox.Password;
+                                if (string.IsNullOrEmpty(pwd)) return;
+                                _wifiStatusMsg = L10n.T(_cfg, "Bağlanılıyor: ", "Connecting: ") + capNet.Ssid + "...";
+                                RebuildUI();
+                                WifiManager.ConnectWithPasswordAsync(capNet.Ssid, pwd, false, delegate(bool ok, string msg)
+                                {
+                                    Dispatcher.BeginInvoke(new Action(delegate
+                                    {
+                                        _wifiStatusMsg = ok
+                                            ? (L10n.T(_cfg, "Bağlandı: ", "Connected: ") + capNet.Ssid)
+                                            : L10n.T(_cfg, "Bağlanamadı (şifreyi kontrol edin).", "Failed to connect (check password).");
+                                        if (ok) { _connectedSsidPreview = capNet.Ssid; _expandedWifiSsid = null; }
+                                        OpenWifiSubView(false);
+                                    }));
+                                });
+                            };
+                            pwdBox.KeyDown += delegate(object s, KeyEventArgs ke)
+                            {
+                                if (ke.Key == Key.Enter) { ke.Handled = true; submitPwd(); }
+                            };
+                            actionArea.Children.Add(pwdBox);
+                            actionArea.Children.Add(MakeWifiActionButton(L10n.T(_cfg, "Bağlan", "Connect"), true, submitPwd));
+                        }
+
+                        cardBody.Children.Add(actionArea);
+                    }
+
+                    rowCard.Child = cardBody;
+                    string capSsid = net.Ssid;
+                    bool capConn = net.IsConnected;
+                    rowCard.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e)
+                    {
+                        if (e.OriginalSource is PasswordBox) return;
+                        if (!capConn && !string.Equals(_expandedWifiSsid, capSsid, StringComparison.OrdinalIgnoreCase))
+                        {
+                            _expandedWifiSsid = capSsid;
+                            RebuildUI();
+                        }
+                    };
+                    listSp.Children.Add(rowCard);
+                }
+
+                sv.Content = listSp;
+                root.Children.Add(sv);
+
+                if (_wifiScan.AccessBlockedByLocation)
+                {
+                    Border locLink = MakeWifiActionButton(L10n.T(_cfg, "Tüm ağlar için Windows Konum İznini Aç", "Enable Location for Nearby Wi-Fi Scan"), false, delegate
+                    {
+                        OpenUri("ms-settings:privacy-location");
+                    });
+                    locLink.Margin = new Thickness(0, 0, 0, 6);
+                    root.Children.Add(locLink);
+                }
+            }
+
+            // Bottom footer: More Wi-Fi Settings link + Win+A
+            Border wfFoot = new Border
+            {
+                BorderBrush = ThemeManager.Brush(_palette.DividerColor),
+                BorderThickness = new Thickness(0, 1, 0, 0),
+                Padding = new Thickness(2, 8, 2, 0)
+            };
+            DockPanel wfDp = new DockPanel();
+            Border winABtn = MakeFooterIconBtn("\uE71D", false, L10n.T(_cfg, "Windows Hızlı Ayarlar (Win+A)", "Windows Quick Settings (Win+A)"), delegate
+            {
+                Close();
+                NativeWin32.OpenWindowsQuickSettings();
+            });
+            DockPanel.SetDock(winABtn, Dock.Right);
+            wfDp.Children.Add(winABtn);
+
+            TextBlock moreLink = new TextBlock
+            {
+                Text = L10n.T(_cfg, "Diğer Wi-Fi ayarları", "More Wi-Fi settings"),
+                FontFamily = new FontFamily("Segoe UI"),
+                FontSize = 11.2,
+                Foreground = ThemeManager.Brush(_palette.Accent),
+                Cursor = Cursors.Hand,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            moreLink.MouseLeftButtonUp += delegate { OpenUri("ms-settings:network-wifi"); };
+            wfDp.Children.Add(moreLink);
+            wfFoot.Child = wfDp;
+            root.Children.Add(wfFoot);
+        }
+
+        private Border MakeWifiActionButton(string label, bool primary, Action onClick)
+        {
+            Border b = new Border
+            {
+                CornerRadius = new CornerRadius(8),
+                Background = primary ? ThemeManager.Brush(_palette.Accent) : ThemeManager.Brush(Color.FromArgb(35, 148, 163, 184)),
+                Padding = new Thickness(12, 6, 12, 6),
+                Cursor = Cursors.Hand,
+                HorizontalAlignment = HorizontalAlignment.Right
+            };
+            b.Child = new TextBlock
+            {
+                Text = label,
+                FontFamily = new FontFamily("Segoe UI"),
+                FontSize = 11.2,
+                FontWeight = FontWeights.SemiBold,
+                Foreground = primary ? Brushes.White : ThemeManager.Brush(_palette.TextPrimary)
+            };
+            b.MouseEnter += delegate { b.Opacity = 0.88; };
+            b.MouseLeave += delegate { b.Opacity = 1.0; };
+            b.PreviewMouseLeftButtonDown += delegate(object s, MouseButtonEventArgs e)
+            {
+                e.Handled = true;
+                onClick();
+            };
+            return b;
+        }
+
         private void ExecuteTileAction(string id)
         {
-            if (id == "wifi") OpenUri("ms-settings:network-wifi");
+            if (id == "wifi") OpenWifiSubView(true);
             else if (id == "bluetooth") OpenUri("ms-settings:bluetooth");
             else if (id == "nightlight") OpenUri("ms-settings:nightlight");
             else if (id == "focus") OpenUri("ms-settings:quiethours");

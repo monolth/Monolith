@@ -69,6 +69,9 @@ namespace Monolith
         public string DockOverlapMode { get; set; } // "SmartHide" (Intellihide), "ReserveSpace", "FloatOver"
         public bool AutoHide { get; set; }
         public bool HideOnFullscreen { get; set; }
+        public bool FastStartupMode { get; set; }
+        public bool AntiCheatSafeMode { get; set; }
+        public bool LowResourceMode { get; set; }
         public bool NamesOnHover { get; set; }
         public bool Use24HourClock { get; set; }
         public bool HideWindowsTaskbar { get; set; }
@@ -132,6 +135,9 @@ namespace Monolith
             DockOverlapMode = "SmartHide";
             AutoHide = false;
             HideOnFullscreen = true;
+            FastStartupMode = true;
+            AntiCheatSafeMode = true;
+            LowResourceMode = false;
             NamesOnHover = true;
             Use24HourClock = true;
             HideWindowsTaskbar = true;

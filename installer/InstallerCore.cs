@@ -32,7 +32,7 @@ namespace MonolithSetup
 
     internal static class InstallerCore
     {
-        public const string AppVersion = "1.0.5";
+        public const string AppVersion = "1.0.6";
         private const string UninstallRegPath = @"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Monolith";
         private const string RunRegPath = @"SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
 
@@ -305,17 +305,47 @@ namespace MonolithSetup
             catch { }
         }
 
+        private static bool RunHiddenSchtasks(string args)
+        {
+            try
+            {
+                ProcessStartInfo psi = new ProcessStartInfo("schtasks.exe", args);
+                psi.CreateNoWindow = true;
+                psi.UseShellExecute = false;
+                psi.WindowStyle = ProcessWindowStyle.Hidden;
+                using (Process p = Process.Start(psi))
+                {
+                    if (p == null) return false;
+                    p.WaitForExit(3500);
+                    return p.ExitCode == 0;
+                }
+            }
+            catch { return false; }
+        }
+
         private static void SetStartupRegistry(bool enable, string exePath)
         {
             try
             {
+                if (!enable || string.IsNullOrEmpty(exePath))
+                {
+                    RunHiddenSchtasks("/Delete /TN \"MonolithInstantBoot\" /F");
+                    using (RegistryKey key = Registry.CurrentUser.OpenSubKey(RunRegPath, true))
+                    {
+                        if (key != null) key.DeleteValue("Monolith", false);
+                    }
+                    return;
+                }
+
+                // Prefer instant boot Scheduled Task (zero Windows 11 Run-key logon delay!), fallback to HKCU\Run
+                bool taskOk = RunHiddenSchtasks("/Create /TN \"MonolithInstantBoot\" /TR \"\\\"" + exePath + "\\\"\" /SC ONLOGON /RL LIMITED /F");
                 using (RegistryKey key = Registry.CurrentUser.OpenSubKey(RunRegPath, true))
                 {
                     if (key == null) return;
-                    if (enable && !string.IsNullOrEmpty(exePath))
-                        key.SetValue("Monolith", "\"" + exePath + "\"");
-                    else
+                    if (taskOk)
                         key.DeleteValue("Monolith", false);
+                    else
+                        key.SetValue("Monolith", "\"" + exePath + "\"");
                 }
             }
             catch { }

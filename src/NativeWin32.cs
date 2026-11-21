@@ -285,6 +285,12 @@ namespace Monolith
         [DllImport("kernel32.dll", SetLastError = true)]
         public static extern bool CloseHandle(IntPtr hObject);
 
+        [DllImport("kernel32.dll")]
+        public static extern IntPtr GetCurrentProcess();
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern bool SetProcessWorkingSetSize(IntPtr hProcess, IntPtr dwMinimumWorkingSetSize, IntPtr dwMaximumWorkingSetSize);
+
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         public static extern bool QueryFullProcessImageName(IntPtr hProcess, uint dwFlags, StringBuilder lpExeName, ref uint lpdwSize);
 
@@ -1353,30 +1359,161 @@ namespace Monolith
             return null;
         }
 
+        // ====== Anti-Cheat Zero-Touch Protection & Fast Cached Process Lookup ======
+        public static bool AntiCheatSafeMode = true;
+
+        private struct CachedProcEntry
+        {
+            public string Name;
+            public string ExePath;
+            public bool IsProtected;
+            public DateTime CachedUtc;
+        }
+
+        private static readonly Dictionary<uint, CachedProcEntry> _procCache = new Dictionary<uint, CachedProcEntry>();
+        private static DateTime _lastProcCachePrune = DateTime.UtcNow;
+
+        private static readonly string[] ProtectedGameTokens = new string[]
+        {
+            "vgc", "vgtray", "vgk", "valorant", "league of legends", "leagueclient", "riotclient",
+            "easyanticheat", "beservice", "bedaisy", "battleye", "faceit", "eseaclient",
+            "eaanticheat", "xigncode", "xhunter", "gamemon", "blackcipher", "nexongamesecurity",
+            "mhyprot", "hoyokprotect", "sguard", "ace-tray", "equ8", "anticheat",
+            "cs2", "csgo", "fortnite", "r5apex", "tslgame", "pubg", "rainbowsix",
+            "modernwarfare", "warzone", "bf2042", "fc24", "fc25", "fifa23", "fifa24",
+            "gta5", "fivem", "ragemp", "genshinimpact", "starrail", "zenlesszonezero",
+            "robloxplayer", "rustclient", "escapefromtarkov", "dota2", "overwatch",
+            "destiny2", "deadbydaylight", "eldenring", "palworld", "helldivers2",
+            "thefinals", "discovery", "marvelrivals", "blackdesert", "lostark",
+            "metin2", "knightonline", "pointblank", "wolfteam", "zula"
+        };
+
+        public static bool IsProtectedGameOrAntiCheatProcess(string procName)
+        {
+            if (string.IsNullOrEmpty(procName)) return false;
+            string low = procName.ToLowerInvariant();
+            if (low == "cod") return true;
+            for (int i = 0; i < ProtectedGameTokens.Length; i++)
+            {
+                if (low.IndexOf(ProtectedGameTokens[i], StringComparison.Ordinal) >= 0)
+                    return true;
+            }
+            return false;
+        }
+
+        public static string GetCachedProcessName(uint pid)
+        {
+            if (pid == 0) return "";
+            DateTime now = DateTime.UtcNow;
+            lock (_procCache)
+            {
+                CachedProcEntry entry;
+                if (_procCache.TryGetValue(pid, out entry) && (now - entry.CachedUtc).TotalSeconds < 15.0)
+                    return entry.Name;
+            }
+
+            string name = "";
+            try
+            {
+                using (Process pr = Process.GetProcessById((int)pid))
+                    name = pr.ProcessName ?? "";
+            }
+            catch { }
+
+            bool prot = IsProtectedGameOrAntiCheatProcess(name);
+            lock (_procCache)
+            {
+                if ((now - _lastProcCachePrune).TotalSeconds > 30.0)
+                {
+                    _procCache.Clear();
+                    _lastProcCachePrune = now;
+                }
+                _procCache[pid] = new CachedProcEntry
+                {
+                    Name = name,
+                    ExePath = null,
+                    IsProtected = prot,
+                    CachedUtc = now
+                };
+            }
+            return name;
+        }
+
+        public static bool IsWindowProtectedGameOrAntiCheat(IntPtr hwnd)
+        {
+            if (hwnd == IntPtr.Zero) return false;
+            try
+            {
+                uint pid;
+                GetWindowThreadProcessId(hwnd, out pid);
+                if (pid == 0) return false;
+                return IsProtectedGameOrAntiCheatProcess(GetCachedProcessName(pid));
+            }
+            catch { return false; }
+        }
+
+        public static void TrimWorkingSet()
+        {
+            try
+            {
+                GC.Collect(GC.MaxGeneration, GCCollectionMode.Optimized, false);
+                SetProcessWorkingSetSize(GetCurrentProcess(), new IntPtr(-1), new IntPtr(-1));
+            }
+            catch { }
+        }
+
         public static string TryGetProcessExePath(uint pid)
         {
             if (pid == 0) return "";
+            string pName = GetCachedProcessName(pid);
+            if (AntiCheatSafeMode && IsProtectedGameOrAntiCheatProcess(pName))
+                return ""; // Zero-touch Anti-Cheat safety: never call OpenProcess on protected games/AC!
+
+            DateTime now = DateTime.UtcNow;
+            lock (_procCache)
+            {
+                CachedProcEntry entry;
+                if (_procCache.TryGetValue(pid, out entry) && entry.ExePath != null && (now - entry.CachedUtc).TotalSeconds < 15.0)
+                    return entry.ExePath;
+            }
+
+            string result = "";
             IntPtr hProc = IntPtr.Zero;
             try
             {
                 hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
-                if (hProc == IntPtr.Zero) return "";
-                StringBuilder sb = new StringBuilder(1024);
-                uint sz = (uint)sb.Capacity;
-                if (QueryFullProcessImageName(hProc, 0, sb, ref sz) && sz > 0)
-                    return sb.ToString();
+                if (hProc != IntPtr.Zero)
+                {
+                    StringBuilder sb = new StringBuilder(1024);
+                    uint sz = (uint)sb.Capacity;
+                    if (QueryFullProcessImageName(hProc, 0, sb, ref sz) && sz > 0)
+                        result = sb.ToString();
+                }
             }
             catch { }
             finally
             {
                 if (hProc != IntPtr.Zero) CloseHandle(hProc);
             }
-            return "";
+
+            lock (_procCache)
+            {
+                CachedProcEntry entry;
+                if (_procCache.TryGetValue(pid, out entry))
+                {
+                    entry.ExePath = result;
+                    _procCache[pid] = entry;
+                }
+            }
+            return result;
         }
 
         public static string TryGetProcessAumid(uint pid)
         {
             if (pid == 0) return null;
+            if (AntiCheatSafeMode && IsProtectedGameOrAntiCheatProcess(GetCachedProcessName(pid)))
+                return null; // Zero-touch Anti-Cheat safety!
+
             IntPtr hProc = IntPtr.Zero;
             try
             {
@@ -1887,6 +2024,29 @@ namespace Monolith
 
         public static ImageSource ExtractIconFromWindow(IntPtr hwnd, string processPath)
         {
+            // Zero-touch Anti-Cheat safety: for protected games/AC, never send cross-process WM_GETICON or open process handles!
+            if (AntiCheatSafeMode && IsWindowProtectedGameOrAntiCheat(hwnd))
+            {
+                try
+                {
+                    IntPtr hClsIcon = GetClassLongPtr(hwnd, GCL_HICON);
+                    if (hClsIcon == IntPtr.Zero) hClsIcon = GetClassLongPtr(hwnd, GCL_HICONSM);
+                    if (hClsIcon != IntPtr.Zero)
+                    {
+                        BitmapSource src = Imaging.CreateBitmapSourceFromHIcon(
+                            hClsIcon, Int32Rect.Empty, BitmapSizeOptions.FromWidthAndHeight(48, 48));
+                        src.Freeze();
+                        return src;
+                    }
+                    string title = GetWindowTitle(hwnd);
+                    string mappedIcon = TryLookupRegisteredIconPath(title, null);
+                    if (!string.IsNullOrEmpty(mappedIcon))
+                        return ExtractIconFromPath(mappedIcon);
+                }
+                catch { }
+                return null;
+            }
+
             string realExePath = "";
             try
             {
@@ -1986,29 +2146,80 @@ namespace Monolith
             return null;
         }
 
-        public static void SetStartupEnabled(bool enable)
+        private const string FastStartupTaskName = "MonolithInstantBoot";
+
+        private static bool RunHiddenSchtasks(string args)
         {
             try
             {
+                ProcessStartInfo psi = new ProcessStartInfo("schtasks.exe", args);
+                psi.CreateNoWindow = true;
+                psi.UseShellExecute = false;
+                psi.WindowStyle = ProcessWindowStyle.Hidden;
+                using (Process p = Process.Start(psi))
+                {
+                    if (p == null) return false;
+                    p.WaitForExit(3500);
+                    return p.ExitCode == 0;
+                }
+            }
+            catch { return false; }
+        }
+
+        public static void SetStartupEnabled(bool enable, bool fastTaskScheduler)
+        {
+            try
+            {
+                string exe = Process.GetCurrentProcess().MainModule.FileName;
+                if (!enable)
+                {
+                    RunHiddenSchtasks("/Delete /TN \"" + FastStartupTaskName + "\" /F");
+                    using (RegistryKey key = Registry.CurrentUser.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Run", true))
+                    {
+                        if (key != null) key.DeleteValue("Monolith", false);
+                    }
+                    return;
+                }
+
+                if (fastTaskScheduler)
+                {
+                    // Instant boot via user-level Task Scheduler (bypasses Windows 11 ~10s HKCU\Run logon delay!)
+                    bool taskOk = RunHiddenSchtasks("/Create /TN \"" + FastStartupTaskName + "\" /TR \"\\\"" + exe + "\\\"\" /SC ONLOGON /RL LIMITED /F");
+                    if (taskOk)
+                    {
+                        using (RegistryKey key = Registry.CurrentUser.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Run", true))
+                        {
+                            if (key != null) key.DeleteValue("Monolith", false);
+                        }
+                        return;
+                    }
+                }
+                else
+                {
+                    RunHiddenSchtasks("/Delete /TN \"" + FastStartupTaskName + "\" /F");
+                }
+
                 using (RegistryKey key = Registry.CurrentUser.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Run", true))
                 {
-                    if (key == null) return;
-                    if (enable)
-                    {
-                        string exe = Process.GetCurrentProcess().MainModule.FileName;
-                        key.SetValue("Monolith", "\"" + exe + "\"");
-                    }
-                    else
-                    {
-                        key.DeleteValue("Monolith", false);
-                    }
+                    if (key != null) key.SetValue("Monolith", "\"" + exe + "\"");
                 }
             }
             catch { }
         }
 
+        public static void SetStartupEnabled(bool enable)
+        {
+            SetStartupEnabled(enable, true);
+        }
+
         public static bool IsStartupEnabled()
         {
+            try
+            {
+                if (RunHiddenSchtasks("/Query /TN \"" + FastStartupTaskName + "\""))
+                    return true;
+            }
+            catch { }
             try
             {
                 using (RegistryKey key = Registry.CurrentUser.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Run", false))

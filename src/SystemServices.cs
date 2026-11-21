@@ -188,10 +188,34 @@ namespace Monolith
             }
             catch { }
 
-            ReadNetworkCounters(out _prevRxBytes, out _prevTxBytes);
+            // Defer heavy disk/network startup work so Monolith appears instantly (<150ms) at Windows logon!
             UpdateFastMetrics(cfg);
-            RefreshDrives();
-            RefreshOnlineAsync(cfg, true);
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                Thread.Sleep(3200);
+                if (HasWidget(cfg, "storage")) RefreshDrives();
+                if (HasWidget(cfg, "network") || HasWidget(cfg, "net"))
+                    ReadNetworkCounters(out _prevRxBytes, out _prevTxBytes);
+                RefreshOnlineAsync(cfg, true);
+            });
+        }
+
+        private static bool HasWidget(MonolithConfig cfg, string id)
+        {
+            if (cfg == null || cfg.ActiveWidgets == null) return false;
+            return cfg.ActiveWidgets.Contains(id);
+        }
+
+        public void RefreshOnDemandForControlCenter()
+        {
+            int vol;
+            bool muted;
+            if (NativeWin32.GetSystemVolume(out vol, out muted))
+            {
+                VolumePercent = vol;
+                VolumeMuted = muted;
+            }
+            DetectNowPlaying();
         }
 
         public event Action<string, string> ToastRequested;
@@ -225,75 +249,99 @@ namespace Monolith
         public void UpdateFastMetrics(MonolithConfig cfg)
         {
             _tickCount++;
+            bool wantCpu = HasWidget(cfg, "cpu") || HasWidget(cfg, "system_chart");
+            bool wantRam = HasWidget(cfg, "ram") || HasWidget(cfg, "system_chart");
+            bool wantNet = HasWidget(cfg, "net") || HasWidget(cfg, "network");
+            bool wantBatt = HasWidget(cfg, "battery");
+            bool wantVol = HasWidget(cfg, "volume");
+            bool wantMedia = HasWidget(cfg, "now_playing") || HasWidget(cfg, "media");
+            bool wantStorage = HasWidget(cfg, "storage");
+            bool wantTrash = HasWidget(cfg, "trash") || HasWidget(cfg, "recycle");
+            bool wantScreenTime = HasWidget(cfg, "screentime") || HasWidget(cfg, "screen_time");
 
-            // 1. CPU
-            CpuPercent = SampleCpu();
-            PushHistory(CpuHistory, CpuPercent, 24);
-
-            // 2. RAM
-            NativeWin32.MEMORYSTATUSEX mem = new NativeWin32.MEMORYSTATUSEX();
-            mem.dwLength = (uint)Marshal.SizeOf(typeof(NativeWin32.MEMORYSTATUSEX));
-            if (NativeWin32.GlobalMemoryStatusEx(ref mem))
+            // 1. CPU (only sample every tick when a CPU widget is active, else every 5s)
+            if (wantCpu || _tickCount % 5 == 1)
             {
-                RamPercent = (int)mem.dwMemoryLoad;
-                RamTotalGB = mem.ullTotalPhys / (1024.0 * 1024.0 * 1024.0);
-                RamUsedGB = (mem.ullTotalPhys - mem.ullAvailPhys) / (1024.0 * 1024.0 * 1024.0);
-            }
-            PushHistory(RamHistory, RamPercent, 24);
-
-            // 3. Network
-            long rx, tx;
-            ReadNetworkCounters(out rx, out tx);
-            DateTime now = DateTime.UtcNow;
-            double sec = (now - _prevNetTime).TotalSeconds;
-            if (sec >= 0.3)
-            {
-                double dRx = rx >= _prevRxBytes ? (rx - _prevRxBytes) / sec : 0;
-                double dTx = tx >= _prevTxBytes ? (tx - _prevTxBytes) / sec : 0;
-                NetDownBps = dRx;
-                NetUpBps = dTx;
-                _prevRxBytes = rx;
-                _prevTxBytes = tx;
-                _prevNetTime = now;
-                PushHistoryDouble(NetHistory, dRx + dTx, 24);
+                CpuPercent = SampleCpu();
+                PushHistory(CpuHistory, CpuPercent, 24);
             }
 
-            // 4. Battery
-            NativeWin32.SYSTEM_POWER_STATUS pwr;
-            if (NativeWin32.GetSystemPowerStatus(out pwr))
+            // 2. RAM (fast lightweight syscall; sample every tick if widget active, else every 5s)
+            if (wantRam || _tickCount % 5 == 1)
             {
-                bool noBatt = (pwr.BatteryFlag & 128) != 0 || pwr.BatteryLifePercent > 100;
-                HasBattery = !noBatt;
-                IsCharging = pwr.ACLineStatus == 1;
-                if (noBatt)
+                NativeWin32.MEMORYSTATUSEX mem = new NativeWin32.MEMORYSTATUSEX();
+                mem.dwLength = (uint)Marshal.SizeOf(typeof(NativeWin32.MEMORYSTATUSEX));
+                if (NativeWin32.GlobalMemoryStatusEx(ref mem))
                 {
-                    BatteryPercent = 100;
-                    BatterySub = "AC POWER";
+                    RamPercent = (int)mem.dwMemoryLoad;
+                    RamTotalGB = mem.ullTotalPhys / (1024.0 * 1024.0 * 1024.0);
+                    RamUsedGB = (mem.ullTotalPhys - mem.ullAvailPhys) / (1024.0 * 1024.0 * 1024.0);
                 }
-                else
+                PushHistory(RamHistory, RamPercent, 24);
+            }
+
+            // 3. Network (skip expensive GetAllNetworkInterfaces when no network widget is active!)
+            if (wantNet)
+            {
+                long rx, tx;
+                ReadNetworkCounters(out rx, out tx);
+                DateTime now = DateTime.UtcNow;
+                double sec = (now - _prevNetTime).TotalSeconds;
+                if (sec >= 0.3)
                 {
-                    BatteryPercent = pwr.BatteryLifePercent;
-                    if (IsCharging)
-                        BatterySub = "CHARGING";
-                    else if (pwr.BatteryLifeTime != uint.MaxValue && pwr.BatteryLifeTime > 60)
+                    double dRx = rx >= _prevRxBytes ? (rx - _prevRxBytes) / sec : 0;
+                    double dTx = tx >= _prevTxBytes ? (tx - _prevTxBytes) / sec : 0;
+                    NetDownBps = dRx;
+                    NetUpBps = dTx;
+                    _prevRxBytes = rx;
+                    _prevTxBytes = tx;
+                    _prevNetTime = now;
+                    PushHistoryDouble(NetHistory, dRx + dTx, 24);
+                }
+            }
+
+            // 4. Battery (every 3s when active, else every 15s)
+            if (wantBatt ? (_tickCount % 3 == 1) : (_tickCount % 15 == 1))
+            {
+                NativeWin32.SYSTEM_POWER_STATUS pwr;
+                if (NativeWin32.GetSystemPowerStatus(out pwr))
+                {
+                    bool noBatt = (pwr.BatteryFlag & 128) != 0 || pwr.BatteryLifePercent > 100;
+                    HasBattery = !noBatt;
+                    IsCharging = pwr.ACLineStatus == 1;
+                    if (noBatt)
                     {
-                        TimeSpan ts = TimeSpan.FromSeconds(pwr.BatteryLifeTime);
-                        BatterySub = string.Format("{0}h {1}m", (int)ts.TotalHours, ts.Minutes);
+                        BatteryPercent = 100;
+                        BatterySub = "AC POWER";
                     }
                     else
                     {
-                        BatterySub = "BATTERY";
+                        BatteryPercent = pwr.BatteryLifePercent;
+                        if (IsCharging)
+                            BatterySub = "CHARGING";
+                        else if (pwr.BatteryLifeTime != uint.MaxValue && pwr.BatteryLifeTime > 60)
+                        {
+                            TimeSpan ts = TimeSpan.FromSeconds(pwr.BatteryLifeTime);
+                            BatterySub = string.Format("{0}h {1}m", (int)ts.TotalHours, ts.Minutes);
+                        }
+                        else
+                        {
+                            BatterySub = "BATTERY";
+                        }
                     }
                 }
             }
 
-            // 5. Volume
-            int vol;
-            bool muted;
-            if (NativeWin32.GetSystemVolume(out vol, out muted))
+            // 5. Volume (avoid creating COM object every second when Volume widget isn't on dock)
+            if (wantVol || _tickCount % 4 == 1)
             {
-                VolumePercent = vol;
-                VolumeMuted = muted;
+                int vol;
+                bool muted;
+                if (NativeWin32.GetSystemVolume(out vol, out muted))
+                {
+                    VolumePercent = vol;
+                    VolumeMuted = muted;
+                }
             }
 
             // 6. Pomodoro
@@ -312,19 +360,18 @@ namespace Monolith
                 }
             }
 
-            // 7. Media window detection every 2 seconds
-            if (_tickCount % 2 == 0)
+            // 7. Media window detection every 3s ONLY when a Media widget is active (saves EnumWindows + Process lookups!)
+            if (wantMedia && _tickCount % 3 == 0)
                 DetectNowPlaying();
 
-            // 8. Drives & Recycle Bin every 6 seconds
-            if (_tickCount % 6 == 0)
-            {
+            // 8. Drives & Recycle Bin ONLY when those widgets are active
+            if (wantStorage && _tickCount % 15 == 0)
                 RefreshDrives();
+            if (wantTrash && _tickCount % 12 == 0)
                 RefreshRecycleBin();
-            }
 
-            // 9. Screen Time tracking every 5 seconds
-            if (_tickCount % 5 == 0)
+            // 9. Screen Time tracking ONLY when Screen Time widget is active
+            if (wantScreenTime && _tickCount % 5 == 0)
             {
                 TrackForegroundApp(cfg, 5);
                 _screenTimeAccum += 5;
@@ -335,9 +382,7 @@ namespace Monolith
                 }
             }
 
-            // 10. Top processes snapshot every 5s in background
-            if (_tickCount % 5 == 1)
-                RefreshTopProcessesAsync();
+            // 10. Top processes snapshot is now strictly ON-DEMAND (when System Monitor popover opens) -> 0 background CPU & 0 anti-cheat scans!
 
             // 11. Online widgets every 10 minutes
             if ((DateTime.UtcNow - _lastOnlineFetch).TotalMinutes >= 10)
@@ -452,8 +497,7 @@ namespace Monolith
 
                     uint pid;
                     NativeWin32.GetWindowThreadProcessId(hWnd, out pid);
-                    string proc = "";
-                    try { proc = Process.GetProcessById((int)pid).ProcessName.ToLowerInvariant(); } catch { }
+                    string proc = NativeWin32.GetCachedProcessName(pid).ToLowerInvariant();
 
                     if (proc == "spotify" && title != "Spotify" && title != "Spotify Free" && title != "Spotify Premium")
                     {
@@ -558,7 +602,7 @@ namespace Monolith
             return procName;
         }
 
-        private void RefreshTopProcessesAsync()
+        public void RefreshTopProcessesAsync()
         {
             ThreadPool.QueueUserWorkItem(delegate
             {

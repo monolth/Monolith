@@ -1197,6 +1197,19 @@ namespace Monolith
             }
             sp.Children.Add(MakeToggleRow(L10n.T(_cfg, "Otomatik Gizle (Kenara gelince aç)", "Auto-Hide Dock"), _cfg.AutoHide, delegate(bool v) { _cfg.AutoHide = v; ApplyAndRefresh(false); }));
             sp.Children.Add(MakeToggleRow(L10n.T(_cfg, "Tam Ekran Uygulama/Oyunlarda Gizle", "Hide in Fullscreen Apps/Games"), _cfg.HideOnFullscreen, delegate(bool v) { _cfg.HideOnFullscreen = v; ApplyAndRefresh(false); }));
+            sp.Children.Add(MakeToggleRow(L10n.T(_cfg, "Anti-Cheat Oyun Koruması (Oyunlarda Uyku & Sıfır Müdahale)", "Anti-Cheat Safe Game Mode (Zero-Touch & Deep Sleep)"), _cfg.AntiCheatSafeMode, delegate(bool v)
+            {
+                _cfg.AntiCheatSafeMode = v;
+                NativeWin32.AntiCheatSafeMode = v;
+                ApplyAndRefresh(false);
+            }));
+            sp.Children.Add(MakeToggleRow(L10n.T(_cfg, "Düşük RAM / İşlemci Tasarruf Modu", "Low RAM & CPU Saver Mode"), _cfg.LowResourceMode, delegate(bool v)
+            {
+                _cfg.LowResourceMode = v;
+                if (v) { _cfg.DockMagnification = false; _cfg.LiveWindowPreviews = false; NativeWin32.TrimWorkingSet(); }
+                ApplyAndRefresh(false);
+                BuildTabContent();
+            }));
             sp.Children.Add(MakeToggleRow(L10n.T(_cfg, "Üzerine Gelince İsim Göster", "Names on Hover"), _cfg.NamesOnHover, delegate(bool v) { _cfg.NamesOnHover = v; ApplyAndRefresh(false); }));
             sp.Children.Add(MakeToggleRow(L10n.T(_cfg, "Açık Pencereleri Dock'ta Göster", "Show Open Windows"), _cfg.ShowOpenWindows, delegate(bool v) { _cfg.ShowOpenWindows = v; ApplyAndRefresh(false); }));
             sp.Children.Add(MakeToggleRow(L10n.T(_cfg, "24 Saat Formatı", "24-Hour Clock"), _cfg.Use24HourClock, delegate(bool v) { _cfg.Use24HourClock = v; ApplyAndRefresh(false); }));
@@ -1207,9 +1220,18 @@ namespace Monolith
                 else NativeWin32.RestoreNativeTaskbars();
                 ApplyAndRefresh(false);
             }));
-            sp.Children.Add(MakeToggleRow(L10n.T(_cfg, "Windows Açılışında Başlat", "Launch at Windows Startup"), NativeWin32.IsStartupEnabled(), delegate(bool v)
+            bool startupOn = NativeWin32.IsStartupEnabled();
+            sp.Children.Add(MakeToggleRow(L10n.T(_cfg, "Windows Açılışında Başlat", "Launch at Windows Startup"), startupOn, delegate(bool v)
             {
-                NativeWin32.SetStartupEnabled(v);
+                NativeWin32.SetStartupEnabled(v, _cfg.FastStartupMode);
+                BuildTabContent();
+            }));
+            sp.Children.Add(MakeToggleRow(L10n.T(_cfg, "Hızlı Açılış Modu (Yeniden Başlatmada Gecikmesiz Başlat)", "Instant Boot Startup (Zero Logon Delay via Task Scheduler)"), _cfg.FastStartupMode, delegate(bool v)
+            {
+                _cfg.FastStartupMode = v;
+                ConfigStore.Save(_cfg);
+                if (NativeWin32.IsStartupEnabled())
+                    NativeWin32.SetStartupEnabled(true, v);
             }));
 
             return sp;

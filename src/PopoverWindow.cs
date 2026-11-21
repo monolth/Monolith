@@ -402,6 +402,10 @@ namespace Monolith
         // ====== SYSTEM / TOP PROCESSES POPOVER ======
         private UIElement BuildSystemPanel()
         {
+            if (_tel.TopMemoryProcs.Count == 0)
+            {
+                _tel.RefreshTopProcessesAsync();
+            }
             StackPanel sp = new StackPanel { Width = 310 };
             sp.Children.Add(MakeHeader(
                 L10n.T(_cfg, "Sistem Monitörü", "System Monitor"),
