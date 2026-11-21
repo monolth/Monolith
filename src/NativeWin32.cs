@@ -776,17 +776,89 @@ namespace Monolith
             }
         }
 
+        /// <summary>
+        /// Hides phantom Windows 11/10 taskbar focus tooltips (e.g. "Gizli simgeleri göster" / "Show hidden icons")
+        /// spawned by Explorer near the bottom-right corner when Win+B wakes the hidden taskbar.
+        /// Never touches the real overflow flyout or real app context menus.
+        /// </summary>
+        public static void SuppressExplorerTaskbarTooltips(IntPtr trayHwnd, bool strictEdgeOnly)
+        {
+            try
+            {
+                if (trayHwnd == IntPtr.Zero) trayHwnd = FindWindow("Shell_TrayWnd", null);
+                if (trayHwnd == IntPtr.Zero) return;
+
+                uint trayPid;
+                GetWindowThreadProcessId(trayHwnd, out trayPid);
+                if (trayPid == 0) return;
+
+                int sw = GetSystemMetrics(0);
+                int sh = GetSystemMetrics(1);
+                IntPtr overflow = FindHiddenIconsOverflowWindow();
+                RECT ovRc = new RECT();
+                bool hasOv = (overflow != IntPtr.Zero) && GetWindowRect(overflow, out ovRc);
+
+                EnumWindows(delegate(IntPtr h, IntPtr lParam)
+                {
+                    if (h == trayHwnd || h == overflow || !IsWindowVisible(h)) return true;
+
+                    uint pid;
+                    GetWindowThreadProcessId(h, out pid);
+                    if (pid != trayPid) return true;
+
+                    string cls = GetWindowClassName(h);
+                    if (cls == "TopLevelWindowForOverflowXamlIsland" || cls == "NotifyIconOverflowWindow" ||
+                        cls == "Shell_TrayWnd" || cls == "Shell_SecondaryTrayWnd")
+                        return true;
+
+                    bool isKnownTooltip = (cls == "Xaml_WindowedPopupClass" || cls == "tooltips_class32" || cls == "PopupHost");
+                    bool isTrayOwnedPopup = (GetWindow(h, GW_OWNER) == trayHwnd);
+                    if (!isKnownTooltip && !isTrayOwnedPopup)
+                        return true;
+
+                    RECT rc;
+                    if (!GetWindowRect(h, out rc)) return true;
+                    int w = rc.Right - rc.Left;
+                    int hgt = rc.Bottom - rc.Top;
+                    if (w <= 0 || w > 420 || hgt <= 0 || hgt > 68) return true;
+
+                    bool nearTaskbarEdge = (rc.Bottom >= sh - 150) || (rc.Top <= 150);
+                    if (!nearTaskbarEdge) return true;
+
+                    if (strictEdgeOnly && hasOv)
+                    {
+                        bool overlapsOverflow = rc.Right > ovRc.Left - 12 && rc.Left < ovRc.Right + 12 &&
+                                                rc.Bottom > ovRc.Top - 48 && rc.Top < ovRc.Bottom + 12;
+                        // Only suppress late tooltips outside our anchored overflow menu (e.g. bottom-right old tray)
+                        if (overlapsOverflow && rc.Right < sw - 80) return true;
+                    }
+
+                    ShowWindowAsync(h, SW_HIDE);
+                    return true;
+                }, IntPtr.Zero);
+            }
+            catch { }
+        }
+
         private static void GhostSleep(IntPtr tray, int totalMs)
         {
             int elapsed = 0;
             while (elapsed < totalMs)
             {
-                if (tray != IntPtr.Zero) GhostTaskbar(tray);
+                if (tray != IntPtr.Zero)
+                {
+                    GhostTaskbar(tray);
+                    SuppressExplorerTaskbarTooltips(tray, false);
+                }
                 int step = Math.Min(15, totalMs - elapsed);
                 Thread.Sleep(step);
                 elapsed += step;
             }
-            if (tray != IntPtr.Zero) GhostTaskbar(tray);
+            if (tray != IntPtr.Zero)
+            {
+                GhostTaskbar(tray);
+                SuppressExplorerTaskbarTooltips(tray, false);
+            }
         }
 
         /// <summary>
@@ -823,9 +895,9 @@ namespace Monolith
                     }
 
                     // 3. Wake up auto-hidden Windows 11 taskbar via Win+B (stays 100% alpha=0 invisible!)
-                    //    This brings Shell_TrayWnd on-screen so XAML chevron invoke & Space/Enter both work!
+                    //    Short 110ms wait wakes the tray before Explorer's focus tooltip settles; tooltips suppressed every 15ms!
                     SendWinCombo(VK_B);
-                    GhostSleep(tray, 220);
+                    GhostSleep(tray, 110);
 
                     // 4. Stage A: Invoke the real chevron button via UIAutomation on the now-awake taskbar
                     bool uiaInvoked = false;
@@ -894,14 +966,18 @@ namespace Monolith
                         }
                     }
 
-                    // 8. Re-anchor smoothly while Windows' flyout entrance animation settles
+                    // 8. Re-anchor smoothly while Windows' flyout entrance animation settles & suppress focus tooltips
                     if (opened)
                     {
-                        for (int k = 0; k < 6; k++)
+                        for (int k = 0; k < 10; k++)
                         {
-                            GhostSleep(tray, 45);
+                            GhostSleep(tray, 40);
                             RepositionHiddenIconsFlyout(anchorCenterX, dockTopPx, dockBottomPx, isTop);
                         }
+                    }
+                    else
+                    {
+                        SuppressExplorerTaskbarTooltips(tray, false);
                     }
                 }
                 catch { }
@@ -915,7 +991,11 @@ namespace Monolith
             int elapsed = 0;
             while (elapsed < maxWaitMs)
             {
-                if (tray != IntPtr.Zero) GhostTaskbar(tray);
+                if (tray != IntPtr.Zero)
+                {
+                    GhostTaskbar(tray);
+                    SuppressExplorerTaskbarTooltips(tray, false);
+                }
                 IntPtr h = FindHiddenIconsOverflowWindow();
                 if (h != IntPtr.Zero)
                 {

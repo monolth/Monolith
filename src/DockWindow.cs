@@ -1587,6 +1587,8 @@ namespace Monolith
                 NativeWin32.RepositionHiddenIconsFlyout(_trayAnchorX, _trayDockTopPx, _trayDockBottomPx, _cfg.IsTop);
 
                 double elapsedMs = (DateTime.UtcNow - _trayFlyoutStartedUtc).TotalMilliseconds;
+                if (elapsedMs < 1400)
+                    NativeWin32.SuppressExplorerTaskbarTooltips(IntPtr.Zero, true);
                 if (!_trayFlyoutOpening && elapsedMs > 550)
                 {
                     bool flyoutOpen = NativeWin32.IsHiddenIconsFlyoutOpen();
